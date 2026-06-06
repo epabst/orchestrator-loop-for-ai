@@ -1,0 +1,78 @@
+states:
+  - name: ai-requirements
+    label: ai-requirements
+    prompt_suffix: |
+      Based on the issue description and comments, create a comprehensive software requirements specification (SRS). 
+      Output only the content of the SRS document. 
+      Ensure you include the keyword "COMPLETED_REQUIREMENTS" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
+    next_state: ai-design
+    keywords:
+      success: COMPLETED_REQUIREMENTS
+      failure: NEED_HUMAN_HELP
+    doc_file: requirements.md
+
+  - name: ai-design
+    label: ai-design
+    prompt_suffix: |
+      Based on the SRS document (requirements.md), create a detailed technical design document.
+      Output only the content of the design document.
+      Ensure you include the keyword "COMPLETED_DESIGN" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
+    next_state: ai-development
+    keywords:
+      success: COMPLETED_DESIGN
+      failure: NEED_HUMAN_HELP
+    doc_file: design.md
+
+  - name: ai-development
+    label: ai-development
+    prompt_suffix: |
+      Implement the design. Follow a test-first approach: write failing tests first, then implement the code to make them pass.
+      Output a summary of your changes.
+      Ensure you include the keyword "COMPLETED_DEVELOPMENT" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
+    next_state: ai-review
+    keywords:
+      success: COMPLETED_DEVELOPMENT
+      failure: NEED_HUMAN_HELP
+
+  - name: ai-review
+    label: ai-review
+    prompt_suffix: |
+      Review the implemented code against the requirements and design. 
+      Output a full review analysis report.
+      Ensure you include the keyword "REVIEW_PASSED" if the code is ready, "REVIEW_FAILED" if it needs more development, or "NEED_HUMAN_HELP" if you need a human to look at it.
+    next_state: ai-pr-creation
+    keywords:
+      success: REVIEW_PASSED
+      back: REVIEW_FAILED
+      failure: NEED_HUMAN_HELP
+
+  - name: ai-pr-creation
+    label: ai-pr-creation
+    prompt_suffix: |
+      Finalize the changes made for this issue.
+      Ensure your code is ready. The Orchestrator will automatically commit, rebase, push, and create/update the Pull Request for you.
+      Output the PR request using the following exact format:
+
+      PR_REQUESTED
+      Title: <Enter PR title here>
+      Body:
+      <Enter PR description/body here>
+      END_PR_REQUEST
+
+      DO NOT perform git operations yourself.
+      Ensure you include the keyword "CHANGES_SUMMARIZED" if successful, or "NEED_HUMAN_HELP" if you encountered an issue.
+    next_state: ai-done
+    keywords:
+      success: CHANGES_SUMMARIZED
+      failure: NEED_HUMAN_HELP
+
+  - name: ai-done
+    label: ai-done
+    prompt_suffix: |
+      The task is completed.
+    keywords:
+      success: DONE
+
+human_help_label: ai-human-help
+lock_label: ai-processing
+enabled_label: ai-enabled
