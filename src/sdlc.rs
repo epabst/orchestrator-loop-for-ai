@@ -13,6 +13,25 @@ pub struct Orchestrator {
     pub workspace: Workspace,
 }
 
+async fn wait_with_feedback(duration: std::time::Duration) -> Result<bool> {
+    let seconds = duration.as_secs();
+    for i in (1..=seconds).rev() {
+        print!("\r{} No issues to process. Waiting for {}s...", "INFO:".blue(), i);
+        use std::io::{self, Write};
+        io::stdout().flush()?;
+        
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n{} Shutdown signal received during sleep. Exiting.", "INFO:".blue());
+                return Ok(true); // Signaled exit
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+        }
+    }
+    print!("\r{}                                                           \n", "INFO:".blue()); // Clear the line
+    Ok(false) // No signal
+}
+
 impl Orchestrator {
     pub fn new(config: SdlcConfig, github: GithubClient, workspace: Workspace) -> Self {
         Self { config, github, workspace }
@@ -57,14 +76,9 @@ impl Orchestrator {
                 break;
             }
             
-            if !work_done { println!("{} No issues to process. Waiting for 15s...", "INFO:".blue());
-                // Sleep with select to allow ctrl_c to interrupt
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        println!("\n{} Shutdown signal received during sleep. Exiting.", "INFO:".blue());
-                        break;
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {}
+            if !work_done {
+                if wait_with_feedback(std::time::Duration::from_secs(15)).await? {
+                    break;
                 }
             }
         }
@@ -510,3 +524,7 @@ impl Orchestrator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "sdlc_tests.rs"]
+mod sdlc_tests;
