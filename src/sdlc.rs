@@ -15,8 +15,8 @@ pub struct Orchestrator {
 
 async fn wait_with_feedback(duration: std::time::Duration) -> Result<bool> {
     let seconds = duration.as_secs();
-    for i in (1..=seconds).rev() {
-        print!("\r{} No issues to process. Waiting for {}s...", "INFO:".blue(), i);
+    for i in 1..=seconds {
+        print!("\r{} No issues to process. Waiting... {}s elapsed.", "INFO:".blue(), i);
         use std::io::{self, Write};
         io::stdout().flush()?;
         
@@ -28,7 +28,8 @@ async fn wait_with_feedback(duration: std::time::Duration) -> Result<bool> {
             _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
         }
     }
-    print!("\r{}                                                           \n", "INFO:".blue()); // Clear the line
+    // Clear the line and return to the beginning of the line without advancing to the next line
+    print!("\r{}                                                           \r", "INFO:".blue());
     Ok(false) // No signal
 }
 
