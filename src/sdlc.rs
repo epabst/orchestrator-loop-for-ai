@@ -336,9 +336,19 @@ impl Orchestrator {
                             .current_dir(&repo_dir)
                             .output()?;
 
-                        let output = if !check_output.stdout.is_empty() && check_output.stdout != b"[]\n" {
+                        let is_empty = check_output.stdout.is_empty() || check_output.stdout == b"[]\n";
+
+                        let output = if !is_empty {
                             // PR exists, update it
                             println!("{} PR already exists, updating...", "INFO:".blue());
+
+                            // Get PR details to show the URL
+                            let pr_list_json = String::from_utf8(check_output.stdout)?;
+                            let pr_num = serde_json::from_str::<Vec<serde_json::Value>>(&pr_list_json)?[0]["number"].as_u64().unwrap();
+                            let pr_url = format!("https://github.com/{}/{}/pull/{}", self.github.owner, self.github.repo, pr_num);
+
+                            println!("{} Updating existing PR: {}", "INFO:".blue(), pr_url);
+
                             std::process::Command::new("gh")
                                 .arg("pr")
                                 .arg("edit")
@@ -364,7 +374,7 @@ impl Orchestrator {
 
                         if output.status.success() {
                             let pr_url = String::from_utf8(output.stdout)?.trim().to_string();
-                            let action = if check_output.stdout.is_empty() || check_output.stdout == b"[]\n" { "created" } else { "updated" };
+                            let action = if is_empty { "created" } else { "updated" };
                             final_response = format!("{}\n\nPull Request {}: {}", final_response, action, pr_url);
                         } else {
                             // If PR already exists, try to update it? For now, just report error.
