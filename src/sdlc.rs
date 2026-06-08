@@ -409,10 +409,6 @@ impl Orchestrator {
         self.github.post_comment(issue.number, &comment_body).await
             .map_err(|e| anyhow!("Failed to post comment: {}", e))?;
 
-        // Sync all documents for this issue
-        self.sync_documents(issue.number).await
-            .map_err(|e| anyhow!("Failed to sync documents: {}", e))?;
-
         Ok(final_response)
     }
 
@@ -438,24 +434,6 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn sync_documents(&self, issue_number: u64) -> Result<()> {
-        let issue_dir = self.workspace.get_issue_dir(&self.github.repo, issue_number);
-        for state in &self.config.states {
-            if let Some(doc_file) = &state.doc_file {
-                let file_path = issue_dir.join(doc_file);
-                if file_path.exists() {
-                    let content = fs::read_to_string(&file_path)?;
-                    self.github.create_or_update_file(
-                        &format!(".ai/{}/{}/{}", self.github.repo, issue_number, doc_file),
-                        &content,
-                        &format!("Sync {} for issue #{}", doc_file, issue_number),
-                        "main"
-                    ).await?;
-                }
-            }
-        }
-        Ok(())
-    }
 
     fn create_and_open_instructions(&self, issue: &Issue, content: &str) -> Result<()> {
         let issue_dir = self.workspace.get_issue_dir(&self.github.repo, issue.number);
