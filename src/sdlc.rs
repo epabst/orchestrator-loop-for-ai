@@ -42,6 +42,8 @@ impl Orchestrator {
         let start_time = Local::now().format("%H:%M:%S").to_string();
         println!("{} Checking for issues every 15s. Started waiting at {}.", "INFO:".blue(), start_time);
 
+        let mut just_finished_work = false;
+
         loop {
             let res: Pin<Box<dyn Future<Output = Result<Vec<Issue>>>>> = if self.all_repos {
                 Box::pin(self.github.list_assigned_issues_in_all_repos())
@@ -88,6 +90,7 @@ impl Orchestrator {
                     }
                     
                     work_done = true;
+                    just_finished_work = true;
                     // Handle only one issue at a time
                     break;
                 }
@@ -97,6 +100,11 @@ impl Orchestrator {
             }
             
             if !work_done {
+                if just_finished_work {
+                    let wait_time = Local::now().format("%H:%M:%S").to_string();
+                    println!("{} Checking for issues every 15s. Started waiting at {}.", "INFO:".blue(), wait_time);
+                    just_finished_work = false;
+                }
                 if wait_with_feedback(std::time::Duration::from_secs(15)).await? {
                     break;
                 }
