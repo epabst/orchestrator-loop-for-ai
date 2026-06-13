@@ -13,23 +13,23 @@ pub struct Orchestrator {
     pub workspace: Workspace,
 }
 
+use chrono::Local;
+
 async fn wait_with_feedback(duration: std::time::Duration) -> Result<bool> {
+    let start_time = Local::now().format("%H:%M:%S").to_string();
     let seconds = duration.as_secs();
-    for i in 1..=seconds {
-        print!("\r{} No issues to process. Waiting... {}s elapsed.", "INFO:".blue(), i);
-        use std::io::{self, Write};
-        io::stdout().flush()?;
-        
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n{} Shutdown signal received during sleep. Exiting.", "INFO:".blue());
-                return Ok(true); // Signaled exit
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+
+    // Just print once that we are waiting and when we started.
+    println!("{} No issues to process. Started waiting at {}. Will check again in {}s.", "INFO:".blue(), start_time, seconds);
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("\n{} Shutdown signal received during sleep. Exiting.", "INFO:".blue());
+            return Ok(true); // Signaled exit
         }
+        _ = tokio::time::sleep(duration) => {}
     }
-    // Clear the line and return to the beginning of the line without advancing to the next line
-    print!("\r{}                                                           \r", "INFO:".blue());
+
     Ok(false) // No signal
 }
 
