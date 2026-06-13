@@ -22,7 +22,7 @@ struct Args {
 
     /// GitHub Repository Name
     #[arg(short, long)]
-    repo: String,
+    repo: Option<String>,
 
     /// Path to SDLC config file
     #[arg(short, long, default_value = "sdlc_config.yaml")]
@@ -44,20 +44,29 @@ async fn main() -> Result<()> {
     let config_yaml = fs::read_to_string(&args.config)?;
     let config = SdlcConfig::from_yaml(&config_yaml)?;
 
-    let repo_name = args.repo
-        .trim_start_matches("https://github.com/")
-        .trim_start_matches("http://github.com/")
-        .split('/')
-        .last()
-        .unwrap_or(&args.repo)
-        .to_string();
-
-    let mut github = GithubClient::new(args.token, String::new(), repo_name.clone())?;
+    let mut github = if let Some(repo_arg) = &args.repo {
+        let repo_name = repo_arg
+            .trim_start_matches("https://github.com/")
+            .trim_start_matches("http://github.com/")
+            .split('/')
+            .last()
+            .unwrap_or(repo_arg)
+            .to_string();
+        
+        let mut client = GithubClient::new(args.token, String::new(), repo_name.clone())?;
+        let owner = client.get_current_user().await?;
+        client.owner = owner;
+        client
+    } else {
+        GithubClient::new(args.token, String::new(), String::new())?
+    };
     
-    // Infer owner from token
-    println!("  {} Inferring GitHub owner from token...", "INFO:".blue());
-    let owner = github.get_current_user().await?;
-    github.owner = owner;
+    // Infer owner if not set (for all-repos mode)
+    if github.owner.is_empty() {
+        println!("  {} Inferring GitHub owner from token...", "INFO:".blue());
+        let owner = github.get_current_user().await?;
+        github.owner = owner;
+    }
 
     let workspace = Workspace::new()?;
 

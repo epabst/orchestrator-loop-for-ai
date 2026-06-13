@@ -22,6 +22,14 @@ impl GithubClient {
         })
     }
 
+    pub fn for_repo(&self, owner: String, repo: String) -> Self {
+        Self {
+            client: self.client.clone(),
+            owner,
+            repo,
+        }
+    }
+
     pub async fn get_current_user(&self) -> Result<String> {
         let user = self.client.current().user().await?;
         Ok(user.login)
@@ -34,6 +42,14 @@ impl GithubClient {
             .assignee(user.as_str())
             .state(octocrab::params::State::Open)
             .send()
+            .await?;
+        Ok(issues.items)
+    }
+
+    pub async fn list_assigned_issues_in_all_repos(&self) -> Result<Vec<Issue>> {
+        // GET /issues lists issues assigned to the authenticated user
+        let issues: octocrab::Page<Issue> = self.client
+            .get("/issues", None::<&()>)
             .await?;
         Ok(issues.items)
     }

@@ -6,11 +6,14 @@ use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
 use std::fs;
+use std::future::Future;
+use std::pin::Pin;
 
 pub struct Orchestrator {
     pub config: SdlcConfig,
     pub github: GithubClient,
     pub workspace: Workspace,
+    pub all_repos: bool,
 }
 
 
@@ -30,7 +33,8 @@ use chrono::Local;
 
 impl Orchestrator {
     pub fn new(config: SdlcConfig, github: GithubClient, workspace: Workspace) -> Self {
-        Self { config, github, workspace }
+        let all_repos = github.repo.is_empty();
+        Self { config, github, workspace, all_repos }
     }
 
     pub async fn run(&self, run_once: bool) -> Result<()> {
@@ -39,18 +43,36 @@ impl Orchestrator {
         println!("{} Checking for issues every 15s. Started waiting at {}.", "INFO:".blue(), start_time);
 
         loop {
+            let res: Pin<Box<dyn Future<Output = Result<Vec<Issue>>>>> = if self.all_repos {
+                Box::pin(self.github.list_assigned_issues_in_all_repos())
+            } else {
+                Box::pin(self.github.list_assigned_issues())
+            };
+            
             let issues = tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     println!("\n{} Shutdown signal received. Exiting.", "INFO:".blue());
                     break;
                 }
-                res = self.github.list_assigned_issues() => res?,
+                res = res => res?,
             };
 
             let mut work_done = false;
             for issue in issues {
                 if self.should_process_issue(&issue).await? {
-                    println!("{} Processing issue #{} - {}", "INFO:".blue(), issue.number, issue.title);
+                    let (owner, repo) = if self.all_repos {
+                        let url = &issue.repository_url;
+                        let path = url.path();
+                        if path.is_empty() { return Err(anyhow!("No repository URL")); }
+                        let parts: Vec<&str> = path.split('/').collect();
+                        (parts[2].to_string(), parts[3].to_string())
+                    } else {
+                        (self.github.owner.clone(), self.github.repo.clone())
+                    };
+                    
+                    let owner_str = owner.to_string();
+                    let repo_str = repo.to_string();
+                    println!("{} Processing issue #{} in {}/{} - {}", "INFO:".blue(), issue.number, owner_str, repo_str, issue.title);
                     
                     // Wrap issue processing in select to handle ctrl+c immediately
                     tokio::select! {
@@ -58,7 +80,7 @@ impl Orchestrator {
                             println!("\n{} Shutdown signal received during processing. Exiting.", "INFO:".blue());
                             return Ok(());
                         }
-                        res = self.process_issue(issue) => {
+                        res = self.process_issue(issue, &owner_str, &repo_str) => {
                             if let Err(e) = res {
                                 eprintln!("{} Failed to process issue: {}", "ERROR:".red(), e);
                             }
@@ -84,7 +106,11 @@ impl Orchestrator {
     }
 
     pub async fn status(&self) -> Result<()> {
-        let issues = self.github.list_assigned_issues().await?;
+        let issues = if self.all_repos {
+            self.github.list_assigned_issues_in_all_repos().await?
+        } else {
+            self.github.list_assigned_issues().await?
+        };
         for issue in issues {
             if self.should_process_issue(&issue).await? {
                 let current_state = self.determine_current_state(&issue)?;
@@ -107,9 +133,21 @@ impl Orchestrator {
             return Ok(false);
         }
 
+        let (owner, repo) = if self.all_repos {
+            let url = &issue.repository_url;
+            let path = url.path();
+            if path.is_empty() { return Err(anyhow!("No repository URL")); }
+            let parts: Vec<&str> = path.split('/').collect();
+            (parts[2].to_string(), parts[3].to_string())
+        } else {
+            (self.github.owner.clone(), self.github.repo.clone())
+        };
+
+        let github = self.github.for_repo(owner, repo);
+
         // Check if current user added the label
-        let current_user = self.github.get_current_user().await?;
-        let events = self.github.get_issue_events(issue.number).await?;
+        let current_user = github.get_current_user().await?;
+        let events = github.get_issue_events(issue.number).await?;
         let label_event = events.iter().find(|e| {
             e.event == octocrab::models::Event::Labeled && 
             e.label.as_ref().map(|l| l.name.as_str()) == Some(self.config.enabled_label.as_str())
@@ -146,26 +184,26 @@ impl Orchestrator {
         Ok(true)
     }
 
-    async fn process_issue(&self, issue: Issue) -> Result<()> {
+    async fn process_issue(&self, issue: Issue, owner: &str, repo: &str) -> Result<()> {
         let issue_id = issue.number;
-        let repo_name = &self.github.repo;
         
         // 1. Acquire local lock
-        self.workspace.create_issue_dir(repo_name, issue_id)?;
-        let _local_lock = self.workspace.acquire_lock(repo_name, issue_id)?;
+        self.workspace.create_issue_dir(repo, issue_id)?;
+        let _local_lock = self.workspace.acquire_lock(repo, issue_id)?;
 
         // 2. Acquire GitHub lock (label)
-        self.github.add_label(issue_id, &self.config.lock_label).await?;
+        let github = self.github.for_repo(owner.to_string(), repo.to_string());
+        github.add_label(issue_id, &self.config.lock_label).await?;
 
-        let result = self.run_sdlc_step(&issue).await;
+        let result = self.run_sdlc_step(&issue, owner, repo).await;
 
         // 3. Release GitHub lock (label)
-        self.github.remove_label(issue_id, &self.config.lock_label).await?;
+        github.remove_label(issue_id, &self.config.lock_label).await?;
 
         result
     }
 
-    async fn run_sdlc_step(&self, issue: &Issue) -> Result<()> {
+    async fn run_sdlc_step(&self, issue: &Issue, owner: &str, repo: &str) -> Result<()> {
         let current_state = self.determine_current_state(issue)?;
         println!("  {} Current state: {}", "STATE:".yellow(), current_state.name);
 
@@ -174,35 +212,35 @@ impl Orchestrator {
         let agent = Agent::new(agent_command);
 
         // Ensure repo is checked out
-        self.ensure_repo_checkout(&self.github.repo, issue.number).await?;
+        self.ensure_repo_checkout(owner, repo, issue.number).await?;
 
         // Write context file
-        self.write_context_file(issue).await?;
+        self.write_context_file(issue, owner, repo).await?;
 
-        let prompt = self.build_prompt(issue, &current_state).await?;
+        let prompt = self.build_prompt(issue, owner, repo, &current_state).await?;
         
-        let audit_dir = self.workspace.get_audit_dir(&self.github.repo, issue.number)?;
+        let audit_dir = self.workspace.get_audit_dir(repo, issue.number)?;
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
         let audit_log_path = audit_dir.join(format!("{}_{}.log", current_state.name, timestamp));
 
         let response = agent.invoke_interactive(
             &prompt, 
             audit_log_path, 
-            Some(self.workspace.get_issue_dir(&self.github.repo, issue.number))
+            Some(self.workspace.get_issue_dir(repo, issue.number))
         ).await?;
 
-        self.handle_agent_response(issue, &current_state, &response).await?;
+        self.handle_agent_response(issue, owner, repo, &current_state, &response).await?;
         Ok(())
     }
 
-    async fn ensure_repo_checkout(&self, repo_name: &str, issue_id: u64) -> Result<()> {
+    async fn ensure_repo_checkout(&self, owner: &str, repo_name: &str, issue_id: u64) -> Result<()> {
         let issue_dir = self.workspace.get_issue_dir(repo_name, issue_id);
         let repo_dir = issue_dir.join(repo_name);
         let branch_name = format!("issue-{}", issue_id);
 
         if !repo_dir.exists() {
             println!("  {} Checking out repository to {:?}", "INFO:".blue(), repo_dir);
-            let repo_url = format!("git@github.com:{}/{}.git", self.github.owner, repo_name);
+            let repo_url = format!("git@github.com:{}/{}.git", owner, repo_name);
             let status = std::process::Command::new("git")
                 .arg("clone")
                 .arg(&repo_url)
@@ -238,14 +276,14 @@ impl Orchestrator {
         Ok(self.config.states[0].clone())
     }
 
-    async fn build_prompt(&self, issue: &Issue, state: &StateConfig) -> Result<String> {
+    async fn build_prompt(&self, issue: &Issue, owner: &str, repo: &str, state: &StateConfig) -> Result<String> {
         let mut prompt = String::new();
         
-        let issue_dir = self.workspace.get_issue_dir(&self.github.repo, issue.number);
+        let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         
         prompt.push_str("You have access to the following files in the current directory:\n");
         prompt.push_str("- 'issue_context.txt' (Contains issue description and recent comments)\n");
-        prompt.push_str(&format!("- '{}' (Repository directory)\n", self.github.repo));
+        prompt.push_str(&format!("- '{}' (Repository directory)\n", repo));
 
         if let Some(doc_file) = &state.doc_file {
             let file_path = issue_dir.join(doc_file);
@@ -276,12 +314,14 @@ impl Orchestrator {
         Ok(prompt)
     }
 
-    async fn handle_agent_response(&self, issue: &Issue, state: &StateConfig, response: &str) -> Result<String> {
+    async fn handle_agent_response(&self, issue: &Issue, _owner: &str, repo: &str, state: &StateConfig, response: &str) -> Result<String> {
         let success_keyword = state.keywords.get("success").ok_or_else(|| anyhow!("No success keyword for state {}", state.name))?;
         let failure_keyword = state.keywords.get("failure").ok_or_else(|| anyhow!("No failure keyword for state {}", state.name))?;
         let back_keyword = state.keywords.get("back");
 
         let mut final_response = response.to_string();
+
+        let github = self.github.for_repo(self.github.owner.clone(), repo.to_string());
 
         // Handle PR creation request
         if state.name == "ai-pr-creation" && final_response.contains("PR_REQUESTED") {
@@ -304,11 +344,11 @@ impl Orchestrator {
                         
                         let title = pr_details[t_start..b_start].trim().to_string();
                         let clean_body = pr_details[b_start..].trim().replace("CHANGES_SUMMARIZED", "").trim().to_string();
-                        let issue_url = format!("https://github.com/{}/{}/issues/{}", self.github.owner, self.github.repo, issue.number);
+                        let issue_url = format!("https://github.com/{}/{}/issues/{}", self.github.owner, repo, issue.number);
                         let body = format!("{}\n\n---\nRelated issue: {}", clean_body, issue_url);
                         
-                        let issue_dir = self.workspace.get_issue_dir(&self.github.repo, issue.number);
-                        let repo_dir = issue_dir.join(&self.github.repo);
+                        let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
+                        let repo_dir = issue_dir.join(repo);
                         let branch_name = format!("issue-{}", issue.number);
 
                         // 1. Commit all changes
@@ -342,7 +382,7 @@ impl Orchestrator {
                             // Get PR details to show the URL
                             let pr_list_json = String::from_utf8(check_output.stdout)?;
                             let pr_num = serde_json::from_str::<Vec<serde_json::Value>>(&pr_list_json)?[0]["number"].as_u64().unwrap();
-                            let pr_url = format!("https://github.com/{}/{}/pull/{}", self.github.owner, self.github.repo, pr_num);
+                            let pr_url = format!("https://github.com/{}/{}/pull/{}", self.github.owner, repo, pr_num);
 
                             println!("{} Updating existing PR: {}", "INFO:".blue(), pr_url);
 
@@ -402,7 +442,7 @@ impl Orchestrator {
             
             // If this state has a doc_file, save it
             if let Some(doc_file) = &state.doc_file {
-                let issue_dir = self.workspace.get_issue_dir(&self.github.repo, issue.number);
+                let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
                 let file_path = issue_dir.join(doc_file);
                 // Strip keywords and transitions from the document? 
                 // Let's just save the response for now, maybe the agent is smart.
@@ -413,29 +453,30 @@ impl Orchestrator {
         }
 
         if next_label == "ai-done" || next_label == self.config.human_help_label {
-            self.create_and_open_instructions(issue, &final_response)?;
+            self.create_and_open_instructions(issue, &self.github.owner, repo, &final_response)?;
         }
 
         let comment_body = format!("{}\n\n{}", transition_line, final_response);
 
         // Update labels
-        if self.github.has_label(issue.number, &state.label).await? {
-            self.github.remove_label(issue.number, &state.label).await
+        if github.has_label(issue.number, &state.label).await? {
+            github.remove_label(issue.number, &state.label).await
                 .map_err(|e| anyhow!("Failed to remove label {}: {}", state.label, e))?;
         }
         
-        self.github.add_label(issue.number, &next_label).await
+        github.add_label(issue.number, &next_label).await
             .map_err(|e| anyhow!("Failed to add label {}: {}", next_label, e))?;
 
         // Post comment
-        self.github.post_comment(issue.number, &comment_body).await
+        github.post_comment(issue.number, &comment_body).await
             .map_err(|e| anyhow!("Failed to post comment: {}", e))?;
 
         Ok(final_response)
     }
 
-    async fn write_context_file(&self, issue: &Issue) -> Result<()> {
-        let comments = self.github.get_issue_comments(issue.number).await?;
+    async fn write_context_file(&self, issue: &Issue, _owner: &str, repo: &str) -> Result<()> {
+        let github = self.github.for_repo(self.github.owner.clone(), repo.to_string());
+        let comments = github.get_issue_comments(issue.number).await?;
         let last_comments: Vec<String> = comments.iter()
             .rev()
             .take(10)
@@ -450,18 +491,18 @@ impl Orchestrator {
             last_comments.join("\n")
         );
 
-        let issue_dir = self.workspace.get_issue_dir(&self.github.repo, issue.number);
+        let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         let file_path = issue_dir.join("issue_context.txt");
         fs::write(file_path, context)?;
         Ok(())
     }
 
 
-    fn create_and_open_instructions(&self, issue: &Issue, content: &str) -> Result<()> {
-        let issue_dir = self.workspace.get_issue_dir(&self.github.repo, issue.number);
+    fn create_and_open_instructions(&self, issue: &Issue, owner: &str, repo: &str, content: &str) -> Result<()> {
+        let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         let html_path = issue_dir.join("instructions.html");
         
-        let issue_url = format!("https://github.com/{}/{}/issues/{}", self.github.owner, self.github.repo, issue.number);
+        let issue_url = format!("https://github.com/{}/{}/issues/{}", owner, repo, issue.number);
         
         // Extract PR URL from the "Pull Request created/updated: <URL>" line
         let pr_url = content.lines()
