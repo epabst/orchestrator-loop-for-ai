@@ -13,15 +13,8 @@ pub struct Orchestrator {
     pub workspace: Workspace,
 }
 
-use chrono::Local;
 
 async fn wait_with_feedback(duration: std::time::Duration) -> Result<bool> {
-    let start_time = Local::now().format("%H:%M:%S").to_string();
-    let seconds = duration.as_secs();
-
-    // Just print once that we are waiting and when we started.
-    println!("{} No issues to process. Started waiting at {}. Will check again in {}s.", "INFO:".blue(), start_time, seconds);
-
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             println!("\n{} Shutdown signal received during sleep. Exiting.", "INFO:".blue());
@@ -33,6 +26,8 @@ async fn wait_with_feedback(duration: std::time::Duration) -> Result<bool> {
     Ok(false) // No signal
 }
 
+use chrono::Local;
+
 impl Orchestrator {
     pub fn new(config: SdlcConfig, github: GithubClient, workspace: Workspace) -> Self {
         Self { config, github, workspace }
@@ -40,7 +35,9 @@ impl Orchestrator {
 
     pub async fn run(&self, run_once: bool) -> Result<()> {
         println!("{}", "Starting Orchestrator Loop...".green().bold());
-        
+        let start_time = Local::now().format("%H:%M:%S").to_string();
+        println!("{} Checking for issues every 15s. Started waiting at {}.", "INFO:".blue(), start_time);
+
         loop {
             let issues = tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
