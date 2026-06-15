@@ -5,6 +5,7 @@ A Rust-based CLI tool that manages an AI-driven software development lifecycle (
 ## Features
 
 - **GitHub-First Workflow:** Uses GitHub labels and comments to drive the SDLC.
+- **Multi-Repo Support:** Run without `--repo` to automatically discover and process assigned issues across all your repositories.
 - **Automated SDLC Stages:**
   - `ai-requirements`: Requirements gathering and spec document creation.
   - `ai-design`: Technical design document creation.
@@ -24,10 +25,11 @@ A Rust-based CLI tool that manages an AI-driven software development lifecycle (
 - GITHUB_TOKEN environment variable set with the necessary permissions.
   - **Best Practice**: Use a **Fine-grained PAT**.
   - To generate: Go to [GitHub Settings](https://github.com/settings/tokens) -> "Personal access tokens" -> "Fine-grained tokens" -> "Generate new token".
-  - Select the target repository, and grant the following repository permissions:
-    - **Issues**: Read and write (Mandatory for the orchestrator to list and manage issues)
+  - For a **single repository**, select that repo and grant:
+    - **Issues**: Read and write
     - **Metadata**: Read-only
     - **Contents**: Read and write
+  - For **all-repos mode** (no `--repo` flag), select "All repositories" and grant the same permissions across all repos you want managed.
 - An AI Agent CLI installed and configured. The default is [`agy`](https://github.com/antgravity/agy).
 
 ## Installation
@@ -84,20 +86,35 @@ state_agents:
 
 ## Usage
 
-Start the orchestrator:
+Start the orchestrator in **all-repos mode** (discovers assigned issues across every repository):
 
 ```bash
 export GITHUB_TOKEN=<YOUR_GITHUB_TOKEN>
-# Example: Managing issues for 'my-org/my-project'
+orchestrator-loop-for-ai
+```
+
+Or target a **specific repository**:
+
+```bash
+export GITHUB_TOKEN=<YOUR_GITHUB_TOKEN>
 orchestrator-loop-for-ai --repo my-project
+# Full URLs also work:
+orchestrator-loop-for-ai --repo https://github.com/my-org/my-project
 ```
 
 ### Options
 
-- `--once`: Runs the orchestrator loop only once and exits.
-- `--status`: Checks the status of the next actionable issue, outputs the command it would run, and exits.
+| Flag | Description |
+|------|-------------|
+| `--repo <name>` | Restrict to a single repository. Omit to process issues across **all** repositories assigned to you. Accepts a repo name or full GitHub URL. |
+| `--once` | Run the orchestrator loop only once and exit. |
+| `--status` | Print the next actionable issue, its current state, and the command that would run, then exit. |
+| `--config <path>` | Path to the SDLC config file (default: `sdlc_config.yaml`). |
 
-The orchestrator will poll for issues assigned to you with the `ai-enabled` label and begin the SDLC process.
+The orchestrator will poll every 15 seconds for issues assigned to you with the `ai-enabled` label and begin the SDLC process.
+
+> [!NOTE]
+> When using all-repos mode, the GITHUB_TOKEN must have **Issues: Read and write** and **Metadata: Read-only** permissions on every repository you want the orchestrator to manage.
 
 ## Local Workspace
 
