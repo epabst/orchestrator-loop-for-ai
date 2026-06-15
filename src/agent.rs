@@ -22,38 +22,70 @@ impl Agent {
         audit_log_path: PathBuf, 
         current_dir: Option<PathBuf>
     ) -> Result<String> {
-        let parts: Vec<&str> = self.command_line.split_whitespace().collect();
-        if parts.is_empty() {
-            return Err(anyhow!("Empty command line"));
-        }
+        // Support {prompt} placeholder: if present, inject prompt as a CLI arg
+        // rather than writing to stdin. This is needed for tools like `agy --print {prompt}`.
+        let use_prompt_arg = self.command_line.contains("{prompt}");
+        let resolved_command = if use_prompt_arg {
+            self.command_line.replace("{prompt}", prompt)
+        } else {
+            self.command_line.clone()
+        };
 
-        println!("{} Executing command: {}", "DEBUG:".cyan(), self.command_line);
+        let parts: Vec<&str> = resolved_command.splitn(2, ' ').collect();
+        let bin = parts[0];
+        // Split remaining args carefully, preserving the injected prompt as one token
+        let args: Vec<String> = if use_prompt_arg {
+            // Re-split the original template args, substituting {prompt} as a single token
+            let template_parts: Vec<&str> = self.command_line.splitn(2, ' ').collect();
+            if template_parts.len() > 1 {
+                // Split non-prompt args, then replace {prompt} token with the actual prompt
+                template_parts[1]
+                    .split_whitespace()
+                    .map(|t| if t == "{prompt}" { prompt.to_string() } else { t.to_string() })
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            if parts.len() > 1 {
+                parts[1].split_whitespace().map(String::from).collect()
+            } else {
+                vec![]
+            }
+        };
 
-        let mut command = Command::new(parts[0]);
-        command.args(&parts[1..]);
+        println!("{} Executing command: {} (prompt via {})", "DEBUG:".cyan(), self.command_line,
+            if use_prompt_arg { "arg" } else { "stdin" });
+
+        let mut command = Command::new(bin);
+        command.args(&args);
         if let Some(dir) = current_dir {
             command.current_dir(dir);
         }
         command.env("GEMINI_CLI_TRUST_WORKSPACE", "true");
-        
+
+        let stdin_cfg = if use_prompt_arg { Stdio::null() } else { Stdio::piped() };
+
         let mut child = command
-            .stdin(Stdio::piped())
+            .stdin(stdin_cfg)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| anyhow!("Failed to spawn agent: {}", e))?;
 
-        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to open stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to open stdout"))?;
         let mut audit_file = File::create(&audit_log_path).await?;
 
-        // Write initial prompt to agent and log it
         println!("{} Sending prompt:\n{}", "DEBUG:".cyan(), prompt);
-        stdin.write_all(prompt.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        drop(stdin); // Close stdin to signal EOF to agent
-        
         audit_file.write_all(format!(">>> PROMPT:\n{}\n", prompt).as_bytes()).await?;
+
+        if !use_prompt_arg {
+            // Write prompt to stdin and close it
+            let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to open stdin"))?;
+            stdin.write_all(prompt.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            drop(stdin);
+        }
 
         let mut stdout_reader = BufReader::new(stdout);
         let mut full_output = Vec::new();

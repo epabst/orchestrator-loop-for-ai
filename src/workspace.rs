@@ -49,9 +49,12 @@ impl Workspace {
         let config_path = self.base_dir.join("config.yaml");
         if !config_path.exists() {
             // Create default config
+            // Default agent is agy. The {prompt} token is replaced with the full prompt
+            // as a single CLI argument. For stdin-based agents (e.g. gemini), omit {prompt}
+            // and set command_template: "gemini"
             let default_config = AgentConfig {
-                command_template: "gemini -m {agent}".to_string(),
-                agents: vec![("default".to_string(), "gemini".to_string())]
+                command_template: "agy --dangerously-skip-permissions --print {prompt}".to_string(),
+                agents: vec![("default".to_string(), "agy".to_string())]
                     .into_iter()
                     .collect(),
                 state_agents: HashMap::new(),
