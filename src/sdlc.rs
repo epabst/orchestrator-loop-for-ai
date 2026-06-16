@@ -392,19 +392,37 @@ impl Orchestrator {
 
                         // If there's nothing to commit (no changes), that's OK
 
-                        // 2. Fetch and sync with main using merge (more reliable than rebase)
+                        // 2. Fetch and sync with main
                         std::process::Command::new("git").current_dir(&repo_dir).arg("fetch").arg("origin").status()?;
 
-                        let merge_status = std::process::Command::new("git")
+                        // Try rebase first for cleaner history
+                        let rebase_status = std::process::Command::new("git")
                             .current_dir(&repo_dir)
-                            .arg("merge")
+                            .arg("rebase")
                             .arg("origin/main")
-                            .arg("-m")
-                            .arg("Merge main branch")
                             .status()?;
 
-                        if !merge_status.success() {
-                            return Err(anyhow!("Failed to merge origin/main - unresolved conflicts in branch"));
+                        if !rebase_status.success() {
+                            println!("{} Rebase conflicts detected, aborting and trying merge...", "WARN:".yellow());
+                            std::process::Command::new("git")
+                                .current_dir(&repo_dir)
+                                .arg("rebase")
+                                .arg("--abort")
+                                .status()?;
+
+                            let merge_status = std::process::Command::new("git")
+                                .current_dir(&repo_dir)
+                                .arg("merge")
+                                .arg("origin/main")
+                                .arg("-m")
+                                .arg("Merge main branch")
+                                .status()?;
+
+                            if !merge_status.success() {
+                                // Merge also has conflicts - invoke agent to resolve
+                                println!("{} Merge conflicts detected, invoking agent to resolve...", "WARN:".yellow());
+                                self.resolve_merge_conflicts(&repo, issue.number).await?;
+                            }
                         }
 
                         // 3. Force Push
@@ -545,6 +563,63 @@ impl Orchestrator {
         Ok(())
     }
 
+
+    async fn resolve_merge_conflicts(&self, repo: &str, issue_id: u64) -> Result<()> {
+        let issue_dir = self.workspace.get_issue_dir(repo, issue_id);
+        let repo_dir = issue_dir.join(repo);
+
+        // Get list of conflicted files
+        let status_output = std::process::Command::new("git")
+            .current_dir(&repo_dir)
+            .arg("diff")
+            .arg("--name-only")
+            .arg("--diff-filter=U")
+            .output()?;
+
+        let conflicted_files = String::from_utf8(status_output.stdout)?;
+
+        // Build prompt for agent to resolve conflicts
+        let mut conflict_prompt = String::from(
+            "A merge conflict has occurred while trying to sync with the latest main branch. \
+             Your changes conflicted with recent changes on main.\n\n\
+             Please resolve these conflicts:\n\n"
+        );
+
+        for file in conflicted_files.lines() {
+            conflict_prompt.push_str(&format!("- {}\n", file));
+        }
+
+        conflict_prompt.push_str(
+            "\nInstructions:\n\
+             1. Read the conflicted files carefully\n\
+             2. Resolve the conflicts by keeping the appropriate code from both versions\n\
+             3. Stage all resolved files with 'git add'\n\
+             4. Complete the merge with 'git commit -m \"Merge main branch\"'\n\
+             5. Report MERGE_RESOLVED when done\n"
+        );
+
+        // Invoke agent to resolve conflicts
+        let agent_config = self.workspace.read_config()?;
+        let agent_command = agent_config.get_command_for_state("ai-pr-creation");
+        let agent = Agent::new(agent_command);
+
+        let audit_dir = self.workspace.get_audit_dir(repo, issue_id)?;
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let audit_log_path = audit_dir.join(format!("merge_conflict_resolution_{}.log", timestamp));
+
+        let response = agent.invoke_interactive(
+            &conflict_prompt,
+            audit_log_path,
+            Some(issue_dir.clone())
+        ).await?;
+
+        if !response.contains("MERGE_RESOLVED") {
+            return Err(anyhow!("Agent failed to resolve merge conflicts"));
+        }
+
+        println!("{} Merge conflicts resolved by agent", "INFO:".blue());
+        Ok(())
+    }
 
     fn create_and_open_instructions(&self, issue: &Issue, owner: &str, repo: &str, content: &str) -> Result<()> {
         let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
