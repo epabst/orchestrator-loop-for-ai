@@ -523,11 +523,12 @@ impl Orchestrator {
 
         let links = format!(r#"
             <div style="margin-bottom: 20px;">
-                <a href="{}" style="margin-right: 15px;">View Issue #{}</a>
+                <a href="{}" style="margin-right: 15px;">View Issue #{}: {}</a>
                 {}
             </div>"#,
             issue_url,
             issue.number,
+            issue.title,
             if !pr_url.is_empty() { format!(r#"<a href="{}">View Pull Request</a>"#, pr_url) } else { "".to_string() }
         );
 
@@ -562,7 +563,7 @@ impl Orchestrator {
                     </style>
                 </head>
                 <body>
-                    <h1>Issue #{}</h1>
+                    <h1>Issue #{}: {}</h1>
                     <div class="timestamp">Generated: {}</div>
                     {}
                     <div style="background: #f9f9f9; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
@@ -571,6 +572,7 @@ impl Orchestrator {
                 </body>
             </html>"#,
             issue.number,
+            issue.title,
             timestamp,
             links,
             formatted_content
