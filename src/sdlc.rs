@@ -392,37 +392,19 @@ impl Orchestrator {
 
                         // If there's nothing to commit (no changes), that's OK
 
-                        // 2. Fetch and sync with main
+                        // 2. Fetch and sync with main using merge (more reliable than rebase)
                         std::process::Command::new("git").current_dir(&repo_dir).arg("fetch").arg("origin").status()?;
 
-                        // Try rebase first; if it fails, abort and use merge instead
-                        let rebase_status = std::process::Command::new("git")
+                        let merge_status = std::process::Command::new("git")
                             .current_dir(&repo_dir)
-                            .arg("rebase")
+                            .arg("merge")
                             .arg("origin/main")
+                            .arg("-m")
+                            .arg("Merge main branch")
                             .status()?;
 
-                        if !rebase_status.success() {
-                            // Rebase failed, abort it and use merge strategy instead
-                            println!("{} Rebase conflict detected, aborting rebase and using merge strategy...", "WARN:".yellow());
-                            std::process::Command::new("git")
-                                .current_dir(&repo_dir)
-                                .arg("rebase")
-                                .arg("--abort")
-                                .status()?;
-
-                            // Merge origin/main instead
-                            let merge_status = std::process::Command::new("git")
-                                .current_dir(&repo_dir)
-                                .arg("merge")
-                                .arg("origin/main")
-                                .arg("-m")
-                                .arg("Merge main branch")
-                                .status()?;
-
-                            if !merge_status.success() {
-                                return Err(anyhow!("Merge also failed - unresolved conflicts in branch"));
-                            }
+                        if !merge_status.success() {
+                            return Err(anyhow!("Failed to merge origin/main - unresolved conflicts in branch"));
                         }
 
                         // 3. Force Push
