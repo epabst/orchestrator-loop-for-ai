@@ -257,6 +257,28 @@ impl Orchestrator {
             if !status.success() {
                 return Err(anyhow!("Failed to clone repository"));
             }
+        } else {
+            // Check if repo is in a broken state (e.g., in the middle of a rebase or merge)
+            let rebase_dir = repo_dir.join(".git/rebase-apply");
+            let merge_head = repo_dir.join(".git/MERGE_HEAD");
+
+            if rebase_dir.exists() {
+                println!("  {} Repository is in the middle of a rebase, aborting...", "WARN:".yellow());
+                std::process::Command::new("git")
+                    .current_dir(&repo_dir)
+                    .arg("rebase")
+                    .arg("--abort")
+                    .status()?;
+            }
+
+            if merge_head.exists() {
+                println!("  {} Repository is in the middle of a merge, aborting...", "WARN:".yellow());
+                std::process::Command::new("git")
+                    .current_dir(&repo_dir)
+                    .arg("merge")
+                    .arg("--abort")
+                    .status()?;
+            }
         }
 
         // Switch to or create branch
@@ -266,7 +288,7 @@ impl Orchestrator {
             .arg("-B")
             .arg(&branch_name)
             .status()?;
-            
+
         if !status.success() {
             return Err(anyhow!("Failed to checkout branch {}", branch_name));
         }
@@ -361,12 +383,48 @@ impl Orchestrator {
 
                         // 1. Commit all changes
                         std::process::Command::new("git").current_dir(&repo_dir).arg("add").arg(".").status()?;
-                        std::process::Command::new("git").current_dir(&repo_dir).arg("commit").arg("-m").arg(&title).status()?;
-                        
-                        // 2. Fetch and Rebase
+                        let commit_status = std::process::Command::new("git")
+                            .current_dir(&repo_dir)
+                            .arg("commit")
+                            .arg("-m")
+                            .arg(&title)
+                            .status()?;
+
+                        // If there's nothing to commit (no changes), that's OK
+
+                        // 2. Fetch and sync with main
                         std::process::Command::new("git").current_dir(&repo_dir).arg("fetch").arg("origin").status()?;
-                        std::process::Command::new("git").current_dir(&repo_dir).arg("rebase").arg("origin/main").status()?;
-                        
+
+                        // Try rebase first; if it fails, abort and use merge instead
+                        let rebase_status = std::process::Command::new("git")
+                            .current_dir(&repo_dir)
+                            .arg("rebase")
+                            .arg("origin/main")
+                            .status()?;
+
+                        if !rebase_status.success() {
+                            // Rebase failed, abort it and use merge strategy instead
+                            println!("{} Rebase conflict detected, aborting rebase and using merge strategy...", "WARN:".yellow());
+                            std::process::Command::new("git")
+                                .current_dir(&repo_dir)
+                                .arg("rebase")
+                                .arg("--abort")
+                                .status()?;
+
+                            // Merge origin/main instead
+                            let merge_status = std::process::Command::new("git")
+                                .current_dir(&repo_dir)
+                                .arg("merge")
+                                .arg("origin/main")
+                                .arg("-m")
+                                .arg("Merge main branch")
+                                .status()?;
+
+                            if !merge_status.success() {
+                                return Err(anyhow!("Merge also failed - unresolved conflicts in branch"));
+                            }
+                        }
+
                         // 3. Force Push
                         std::process::Command::new("git").current_dir(&repo_dir).arg("push").arg("-f").arg("origin").arg(&branch_name).status()?;
                         
