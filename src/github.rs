@@ -71,6 +71,13 @@ impl GithubClient {
         Ok(())
     }
 
+    pub async fn get_issue(&self, issue_number: u64) -> Result<Issue> {
+        let issue = self.client.issues(&self.owner, &self.repo)
+            .get(issue_number)
+            .await?;
+        Ok(issue)
+    }
+
     pub async fn has_label(&self, issue_number: u64, label: &str) -> Result<bool> {
         let issue = self.client.issues(&self.owner, &self.repo)
             .get(issue_number)

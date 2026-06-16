@@ -2,23 +2,18 @@ use crate::config::{SdlcConfig, StateConfig};
 use crate::github::GithubClient;
 use crate::workspace::{Workspace};
 use crate::agent::Agent;
-use crate::issue_context::IssueContextStore;
-use crate::signal_handler::OutputGenerator;
 use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
 use std::fs;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 pub struct Orchestrator {
     pub config: SdlcConfig,
     pub github: GithubClient,
     pub workspace: Workspace,
     pub all_repos: bool,
-    pub context_store: Arc<IssueContextStore>,
-    pub last_processed_issue: Option<(String, u64)>,
 }
 
 
@@ -39,11 +34,10 @@ use chrono::Local;
 impl Orchestrator {
     pub fn new(config: SdlcConfig, github: GithubClient, workspace: Workspace) -> Self {
         let all_repos = github.repo.is_empty();
-        let context_store = Arc::new(IssueContextStore::new());
-        Self { config, github, workspace, all_repos, context_store, last_processed_issue: None }
+        Self { config, github, workspace, all_repos }
     }
 
-    pub async fn run(&mut self, run_once: bool) -> Result<()> {
+    pub async fn run(&self, run_once: bool) -> Result<()> {
         println!("{}", "Starting Orchestrator Loop...".green().bold());
         let start_time = Local::now().format("%H:%M:%S").to_string();
         println!("{} Checking for issues every 15s. Started waiting at {}.", "INFO:".blue(), start_time);
@@ -56,13 +50,9 @@ impl Orchestrator {
             } else {
                 Box::pin(self.github.list_assigned_issues())
             };
-
+            
             let issues = tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
-                    if let Some(context) = self.context_store.get_current_issue() {
-                        let message = OutputGenerator::generate_output(Some(&context));
-                        OutputGenerator::display_output(&message);
-                    }
                     println!("\n{} Shutdown signal received. Exiting.", "INFO:".blue());
                     break;
                 }
@@ -70,9 +60,7 @@ impl Orchestrator {
             };
 
             let mut work_done = false;
-
-            // Use sticky selection instead of direct iteration
-            if let Some(issue) = self.select_next_issue(issues.clone()).await {
+            for issue in issues {
                 if self.should_process_issue(&issue).await? {
                     let (owner, repo) = if self.all_repos {
                         let url = &issue.repository_url;
@@ -83,61 +71,34 @@ impl Orchestrator {
                     } else {
                         (self.github.owner.clone(), self.github.repo.clone())
                     };
-
+                    
                     let owner_str = owner.to_string();
                     let repo_str = repo.to_string();
                     println!("{} Processing issue #{} in {}/{} - {}", "INFO:".blue(), issue.number, owner_str, repo_str, issue.title);
-
-                    // Clone issue for terminal state detection after processing
-                    let issue_number = issue.number;
-
+                    
                     // Wrap issue processing in select to handle ctrl+c immediately
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {
-                            if let Some(context) = self.context_store.get_current_issue() {
-                                let message = OutputGenerator::generate_output(Some(&context));
-                                OutputGenerator::display_output(&message);
-                            }
                             println!("\n{} Shutdown signal received during processing. Exiting.", "INFO:".blue());
                             return Ok(());
                         }
-                        res = self.process_issue(issue.clone(), &owner_str, &repo_str) => {
-                            match res {
-                                Ok(()) => {
-                                    // Fetch the issue again to check its new state
-                                    let github = self.github.for_repo(owner_str.clone(), repo_str.clone());
-                                    match github.get_issue(issue_number).await {
-                                        Ok(updated_issue) => {
-                                            // Determine if the new state is terminal
-                                            let terminal = updated_issue.labels.iter().any(|l| l.name == "ai-done") ||
-                                                         updated_issue.labels.iter().any(|l| l.name == self.config.human_help_label);
-                                            self.update_sticky_state(&issue, terminal);
-                                        }
-                                        Err(e) => {
-                                            eprintln!("{} Failed to fetch updated issue after processing: {}", "WARN:".yellow(), e);
-                                            // Clear sticky state on fetch error to avoid getting stuck
-                                            self.clear_sticky_state();
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("{} Failed to process issue: {}", "ERROR:".red(), e);
-                                    self.clear_sticky_state();
-                                }
+                        res = self.process_issue(issue, &owner_str, &repo_str) => {
+                            if let Err(e) = res {
+                                eprintln!("{} Failed to process issue: {}", "ERROR:".red(), e);
                             }
                         }
                     }
-
+                    
                     work_done = true;
                     just_finished_work = true;
                     // Handle only one issue at a time
+                    break;
                 }
             }
-
             if run_once {
                 break;
             }
-
+            
             if !work_done {
                 if just_finished_work {
                     let wait_time = Local::now().format("%H:%M:%S").to_string();
@@ -231,79 +192,9 @@ impl Orchestrator {
         Ok(true)
     }
 
-    async fn select_next_issue(&self, issues: Vec<Issue>) -> Option<Issue> {
-        // First, check if sticky issue is still valid and available
-        if let Some((ref sticky_repo, sticky_num)) = self.last_processed_issue {
-            if let Some(sticky_issue) = issues.iter().find(|issue| {
-                issue.number == sticky_num &&
-                (self.all_repos == false || {
-                    let url = &issue.repository_url;
-                    let path = url.path();
-                    if path.is_empty() { return false; }
-                    let parts: Vec<&str> = path.split('/').collect();
-                    parts.get(3).map(|r| r.to_string()) == Some(sticky_repo.clone())
-                })
-            }) {
-                // Check if sticky issue still meets processability criteria
-                let has_enabled = sticky_issue.labels.iter().any(|l| l.name == self.config.enabled_label);
-                let has_processing = sticky_issue.labels.iter().any(|l| l.name == self.config.lock_label);
-                let has_human_help = sticky_issue.labels.iter().any(|l| l.name == self.config.human_help_label);
-                let has_done = sticky_issue.labels.iter().any(|l| l.name == "ai-done");
-
-                if has_enabled && !has_processing && !has_human_help && !has_done {
-                    return Some(sticky_issue.clone());
-                }
-            }
-        }
-
-        // Fallback to first processable issue in standard order
-        for issue in issues {
-            let has_enabled = issue.labels.iter().any(|l| l.name == self.config.enabled_label);
-            let has_processing = issue.labels.iter().any(|l| l.name == self.config.lock_label);
-            let has_human_help = issue.labels.iter().any(|l| l.name == self.config.human_help_label);
-            let has_done = issue.labels.iter().any(|l| l.name == "ai-done");
-
-            if has_enabled && !has_processing && !has_human_help && !has_done {
-                return Some(issue);
-            }
-        }
-
-        None
-    }
-
-    fn update_sticky_state(&mut self, processed_issue: &Issue, terminal_state: bool) {
-        if terminal_state {
-            // Clear sticky state for terminal transitions (ai-done, ai-human-help)
-            self.last_processed_issue = None;
-        } else {
-            // Keep sticky state for intermediate transitions
-            let repo = if self.all_repos {
-                let url = &processed_issue.repository_url;
-                let path = url.path();
-                if !path.is_empty() {
-                    let parts: Vec<&str> = path.split('/').collect();
-                    parts.get(3).map(|s| s.to_string()).unwrap_or_default()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
-            self.last_processed_issue = Some((repo, processed_issue.number));
-        }
-    }
-
-    fn clear_sticky_state(&mut self) {
-        self.last_processed_issue = None;
-    }
-
     async fn process_issue(&self, issue: Issue, owner: &str, repo: &str) -> Result<()> {
         let issue_id = issue.number;
-        let issue_url = issue.html_url.to_string();
-
-        // Set current issue in context store
-        self.context_store.set_current_issue(issue_url, Some(issue_id.to_string()));
-
+        
         // 1. Acquire local lock
         self.workspace.create_issue_dir(repo, issue_id)?;
         let _local_lock = self.workspace.acquire_lock(repo, issue_id)?;
@@ -316,9 +207,6 @@ impl Orchestrator {
 
         // 3. Release GitHub lock (label)
         github.remove_label(issue_id, &self.config.lock_label).await?;
-
-        // Clear current issue from context store
-        self.context_store.clear_current_issue();
 
         result
     }
@@ -369,28 +257,6 @@ impl Orchestrator {
             if !status.success() {
                 return Err(anyhow!("Failed to clone repository"));
             }
-        } else {
-            // Check if repo is in a broken state (e.g., in the middle of a rebase or merge)
-            let rebase_dir = repo_dir.join(".git/rebase-apply");
-            let merge_head = repo_dir.join(".git/MERGE_HEAD");
-
-            if rebase_dir.exists() {
-                println!("  {} Repository is in the middle of a rebase, aborting...", "WARN:".yellow());
-                std::process::Command::new("git")
-                    .current_dir(&repo_dir)
-                    .arg("rebase")
-                    .arg("--abort")
-                    .status()?;
-            }
-
-            if merge_head.exists() {
-                println!("  {} Repository is in the middle of a merge, aborting...", "WARN:".yellow());
-                std::process::Command::new("git")
-                    .current_dir(&repo_dir)
-                    .arg("merge")
-                    .arg("--abort")
-                    .status()?;
-            }
         }
 
         // Switch to or create branch
@@ -400,7 +266,7 @@ impl Orchestrator {
             .arg("-B")
             .arg(&branch_name)
             .status()?;
-
+            
         if !status.success() {
             return Err(anyhow!("Failed to checkout branch {}", branch_name));
         }
@@ -495,48 +361,12 @@ impl Orchestrator {
 
                         // 1. Commit all changes
                         std::process::Command::new("git").current_dir(&repo_dir).arg("add").arg(".").status()?;
-                        let commit_status = std::process::Command::new("git")
-                            .current_dir(&repo_dir)
-                            .arg("commit")
-                            .arg("-m")
-                            .arg(&title)
-                            .status()?;
-
-                        // If there's nothing to commit (no changes), that's OK
-
-                        // 2. Fetch and sync with main
+                        std::process::Command::new("git").current_dir(&repo_dir).arg("commit").arg("-m").arg(&title).status()?;
+                        
+                        // 2. Fetch and Rebase
                         std::process::Command::new("git").current_dir(&repo_dir).arg("fetch").arg("origin").status()?;
-
-                        // Try rebase first for cleaner history
-                        let rebase_status = std::process::Command::new("git")
-                            .current_dir(&repo_dir)
-                            .arg("rebase")
-                            .arg("origin/main")
-                            .status()?;
-
-                        if !rebase_status.success() {
-                            println!("{} Rebase conflicts detected, aborting and trying merge...", "WARN:".yellow());
-                            std::process::Command::new("git")
-                                .current_dir(&repo_dir)
-                                .arg("rebase")
-                                .arg("--abort")
-                                .status()?;
-
-                            let merge_status = std::process::Command::new("git")
-                                .current_dir(&repo_dir)
-                                .arg("merge")
-                                .arg("origin/main")
-                                .arg("-m")
-                                .arg("Merge main branch")
-                                .status()?;
-
-                            if !merge_status.success() {
-                                // Merge also has conflicts - invoke agent to resolve
-                                println!("{} Merge conflicts detected, invoking agent to resolve...", "WARN:".yellow());
-                                self.resolve_merge_conflicts(&repo, issue.number).await?;
-                            }
-                        }
-
+                        std::process::Command::new("git").current_dir(&repo_dir).arg("rebase").arg("origin/main").status()?;
+                        
                         // 3. Force Push
                         std::process::Command::new("git").current_dir(&repo_dir).arg("push").arg("-f").arg("origin").arg(&branch_name).status()?;
                         
@@ -676,94 +506,34 @@ impl Orchestrator {
     }
 
 
-    async fn resolve_merge_conflicts(&self, repo: &str, issue_id: u64) -> Result<()> {
-        let issue_dir = self.workspace.get_issue_dir(repo, issue_id);
-        let repo_dir = issue_dir.join(repo);
-
-        // Get list of conflicted files
-        let status_output = std::process::Command::new("git")
-            .current_dir(&repo_dir)
-            .arg("diff")
-            .arg("--name-only")
-            .arg("--diff-filter=U")
-            .output()?;
-
-        let conflicted_files = String::from_utf8(status_output.stdout)?;
-
-        // Build prompt for agent to resolve conflicts
-        let mut conflict_prompt = String::from(
-            "A merge conflict has occurred while trying to sync with the latest main branch. \
-             Your changes conflicted with recent changes on main.\n\n\
-             Please resolve these conflicts:\n\n"
-        );
-
-        for file in conflicted_files.lines() {
-            conflict_prompt.push_str(&format!("- {}\n", file));
-        }
-
-        conflict_prompt.push_str(
-            "\nInstructions:\n\
-             1. Read the conflicted files carefully\n\
-             2. Resolve the conflicts by keeping the appropriate code from both versions\n\
-             3. Stage all resolved files with 'git add'\n\
-             4. Complete the merge with 'git commit -m \"Merge main branch\"'\n\
-             5. Report MERGE_RESOLVED when done\n"
-        );
-
-        // Invoke agent to resolve conflicts
-        let agent_config = self.workspace.read_config()?;
-        let agent_command = agent_config.get_command_for_state("ai-pr-creation");
-        let agent = Agent::new(agent_command);
-
-        let audit_dir = self.workspace.get_audit_dir(repo, issue_id)?;
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let audit_log_path = audit_dir.join(format!("merge_conflict_resolution_{}.log", timestamp));
-
-        let response = agent.invoke_interactive(
-            &conflict_prompt,
-            audit_log_path,
-            Some(issue_dir.clone())
-        ).await?;
-
-        if !response.contains("MERGE_RESOLVED") {
-            return Err(anyhow!("Agent failed to resolve merge conflicts"));
-        }
-
-        println!("{} Merge conflicts resolved by agent", "INFO:".blue());
-        Ok(())
-    }
-
     fn create_and_open_instructions(&self, issue: &Issue, owner: &str, repo: &str, content: &str) -> Result<()> {
         let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         let html_path = issue_dir.join("instructions.html");
-
+        
         let issue_url = format!("https://github.com/{}/{}/issues/{}", owner, repo, issue.number);
-
+        
         // Extract PR URL from the "Pull Request created/updated: <URL>" line
         let pr_url = content.lines()
             .find(|line| line.contains("Pull Request created:") || line.contains("Pull Request updated:"))
             .and_then(|line| line.split(": ").nth(1))
             .unwrap_or("")
             .trim();
-
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
+        
         let links = format!(r#"
             <div style="margin-bottom: 20px;">
-                <a href="{}" style="margin-right: 15px;">View Issue #{}: {}</a>
+                <a href="{}" style="margin-right: 15px;">View Issue #{}</a>
                 {}
-            </div>"#,
-            issue_url,
+            </div>"#, 
+            issue_url, 
             issue.number,
-            issue.title,
             if !pr_url.is_empty() { format!(r#"<a href="{}">View Pull Request</a>"#, pr_url) } else { "".to_string() }
         );
-
+        
         // Improve Markdown-to-HTML conversion
         let mut formatted_content = content.replace("### ", "<h2>")
             .replace("**", "<strong>")
             .replace("`", "<code>");
-
+        
         // Fix closing tags for markdown-like parsing
         formatted_content = formatted_content.replace("</strong>", "</strong>") // already correct
             .replace("</h2>", "</h2>")
@@ -786,12 +556,10 @@ impl Orchestrator {
                         a {{ color: #3498db; text-decoration: none; font-weight: bold; }}
                         a:hover {{ text-decoration: underline; }}
                         strong {{ color: #333; }}
-                        .timestamp {{ font-size: 0.9em; color: #888; margin-bottom: 10px; }}
                     </style>
                 </head>
                 <body>
-                    <h1>Issue #{}: {}</h1>
-                    <div class="timestamp">Generated: {}</div>
+                    <h1>Issue #{}</h1>
                     {}
                     <div style="background: #f9f9f9; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
                         {}
@@ -799,8 +567,6 @@ impl Orchestrator {
                 </body>
             </html>"#,
             issue.number,
-            issue.title,
-            timestamp,
             links,
             formatted_content
         );

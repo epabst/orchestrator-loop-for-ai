@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
 
     let workspace = Workspace::new()?;
 
-    let orchestrator = Orchestrator::new(config, github, workspace);
+    let mut orchestrator = Orchestrator::new(config, github, workspace);
 
     if args.status {
         orchestrator.status().await?;
