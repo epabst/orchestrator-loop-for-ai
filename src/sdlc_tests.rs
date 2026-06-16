@@ -179,3 +179,52 @@ fn test_sticky_state_preserves_both_repo_and_number() {
         panic!("State should be Some");
     }
 }
+
+#[test]
+fn test_escape_html_normal_text() {
+    let input = "Fix login bug";
+    let expected = "Fix login bug";
+    assert_eq!(escape_html(input), expected);
+}
+
+#[test]
+fn test_escape_html_with_script_tags() {
+    let input = "<script>alert('xss')</script>";
+    let expected = "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;";
+    assert_eq!(escape_html(input), expected);
+}
+
+#[test]
+fn test_escape_html_with_ampersand() {
+    let input = "Issue with & symbol";
+    let expected = "Issue with &amp; symbol";
+    assert_eq!(escape_html(input), expected);
+}
+
+#[test]
+fn test_escape_html_with_quotes() {
+    let input = "Title with \"quotes\"";
+    let expected = "Title with &quot;quotes&quot;";
+    assert_eq!(escape_html(input), expected);
+}
+
+#[test]
+fn test_escape_html_with_single_quotes() {
+    let input = "Title with 'single quotes'";
+    let expected = "Title with &#39;single quotes&#39;";
+    assert_eq!(escape_html(input), expected);
+}
+
+#[test]
+fn test_escape_html_with_multiple_special_chars() {
+    let input = "<div>Title & \"body\" with 'quotes'</div>";
+    let expected = "&lt;div&gt;Title &amp; &quot;body&quot; with &#39;quotes&#39;&lt;/div&gt;";
+    assert_eq!(escape_html(input), expected);
+}
+
+#[test]
+fn test_escape_html_empty_string() {
+    let input = "";
+    let expected = "";
+    assert_eq!(escape_html(input), expected);
+}
