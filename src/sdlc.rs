@@ -36,6 +36,14 @@ async fn wait_with_feedback(duration: std::time::Duration) -> Result<bool> {
 
 use chrono::Local;
 
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 impl Orchestrator {
     pub fn new(config: SdlcConfig, github: GithubClient, workspace: Workspace) -> Self {
         let all_repos = github.repo.is_empty();
@@ -748,7 +756,7 @@ impl Orchestrator {
             .trim();
 
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
+        let escaped_title = escape_html(&issue.title);
         let links = format!(r#"
             <div style="margin-bottom: 20px;">
                 <a href="{}" style="margin-right: 15px;">View Issue #{}: {}</a>
@@ -756,7 +764,7 @@ impl Orchestrator {
             </div>"#,
             issue_url,
             issue.number,
-            issue.title,
+            escaped_title,
             if !pr_url.is_empty() { format!(r#"<a href="{}">View Pull Request</a>"#, pr_url) } else { "".to_string() }
         );
 
@@ -800,7 +808,7 @@ impl Orchestrator {
                 </body>
             </html>"#,
             issue.number,
-            issue.title,
+            escaped_title,
             timestamp,
             links,
             formatted_content
