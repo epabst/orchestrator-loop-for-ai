@@ -509,31 +509,33 @@ impl Orchestrator {
     fn create_and_open_instructions(&self, issue: &Issue, owner: &str, repo: &str, content: &str) -> Result<()> {
         let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         let html_path = issue_dir.join("instructions.html");
-        
+
         let issue_url = format!("https://github.com/{}/{}/issues/{}", owner, repo, issue.number);
-        
+
         // Extract PR URL from the "Pull Request created/updated: <URL>" line
         let pr_url = content.lines()
             .find(|line| line.contains("Pull Request created:") || line.contains("Pull Request updated:"))
             .and_then(|line| line.split(": ").nth(1))
             .unwrap_or("")
             .trim();
-        
+
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
         let links = format!(r#"
             <div style="margin-bottom: 20px;">
                 <a href="{}" style="margin-right: 15px;">View Issue #{}</a>
                 {}
-            </div>"#, 
-            issue_url, 
+            </div>"#,
+            issue_url,
             issue.number,
             if !pr_url.is_empty() { format!(r#"<a href="{}">View Pull Request</a>"#, pr_url) } else { "".to_string() }
         );
-        
+
         // Improve Markdown-to-HTML conversion
         let mut formatted_content = content.replace("### ", "<h2>")
             .replace("**", "<strong>")
             .replace("`", "<code>");
-        
+
         // Fix closing tags for markdown-like parsing
         formatted_content = formatted_content.replace("</strong>", "</strong>") // already correct
             .replace("</h2>", "</h2>")
@@ -556,10 +558,12 @@ impl Orchestrator {
                         a {{ color: #3498db; text-decoration: none; font-weight: bold; }}
                         a:hover {{ text-decoration: underline; }}
                         strong {{ color: #333; }}
+                        .timestamp {{ font-size: 0.9em; color: #888; margin-bottom: 10px; }}
                     </style>
                 </head>
                 <body>
                     <h1>Issue #{}</h1>
+                    <div class="timestamp">Generated: {}</div>
                     {}
                     <div style="background: #f9f9f9; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
                         {}
@@ -567,6 +571,7 @@ impl Orchestrator {
                 </body>
             </html>"#,
             issue.number,
+            timestamp,
             links,
             formatted_content
         );
