@@ -2,8 +2,10 @@ states:
   - name: ai-requirements
     label: ai-requirements
     prompt_suffix: |
-      Based on the issue description and comments, create a comprehensive software requirements specification (SRS). 
-      Output only the content of the SRS document. 
+      Based on the issue description and comments, create a comprehensive software requirements specification (SRS).
+      Focus on functional requirements, non-functional requirements, and constraints.
+      Do NOT include architectural or design details.
+      Output only the content of the SRS document.
       Ensure you include the keyword "COMPLETED_REQUIREMENTS" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
     next_state: ai-design
     keywords:
@@ -15,6 +17,7 @@ states:
     label: ai-design
     prompt_suffix: |
       Based on the SRS document (requirements.md), create a detailed technical design document.
+      Include the architectural plan/design as the primary focus, along with detailed technical design specifications.
       Output only the content of the design document.
       Ensure you include the keyword "COMPLETED_DESIGN" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
     next_state: ai-development
