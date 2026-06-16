@@ -2,18 +2,22 @@ use crate::config::{SdlcConfig, StateConfig};
 use crate::github::GithubClient;
 use crate::workspace::{Workspace};
 use crate::agent::Agent;
+use crate::issue_context::IssueContextStore;
+use crate::signal_handler::OutputGenerator;
 use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
 use std::fs;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub struct Orchestrator {
     pub config: SdlcConfig,
     pub github: GithubClient,
     pub workspace: Workspace,
     pub all_repos: bool,
+    pub context_store: Arc<IssueContextStore>,
 }
 
 
@@ -34,7 +38,8 @@ use chrono::Local;
 impl Orchestrator {
     pub fn new(config: SdlcConfig, github: GithubClient, workspace: Workspace) -> Self {
         let all_repos = github.repo.is_empty();
-        Self { config, github, workspace, all_repos }
+        let context_store = Arc::new(IssueContextStore::new());
+        Self { config, github, workspace, all_repos, context_store }
     }
 
     pub async fn run(&self, run_once: bool) -> Result<()> {
@@ -53,6 +58,10 @@ impl Orchestrator {
             
             let issues = tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
+                    if let Some(context) = self.context_store.get_current_issue() {
+                        let message = OutputGenerator::generate_output(Some(&context));
+                        OutputGenerator::display_output(&message);
+                    }
                     println!("\n{} Shutdown signal received. Exiting.", "INFO:".blue());
                     break;
                 }
@@ -79,6 +88,10 @@ impl Orchestrator {
                     // Wrap issue processing in select to handle ctrl+c immediately
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {
+                            if let Some(context) = self.context_store.get_current_issue() {
+                                let message = OutputGenerator::generate_output(Some(&context));
+                                OutputGenerator::display_output(&message);
+                            }
                             println!("\n{} Shutdown signal received during processing. Exiting.", "INFO:".blue());
                             return Ok(());
                         }
@@ -194,7 +207,11 @@ impl Orchestrator {
 
     async fn process_issue(&self, issue: Issue, owner: &str, repo: &str) -> Result<()> {
         let issue_id = issue.number;
-        
+        let issue_url = issue.html_url.to_string();
+
+        // Set current issue in context store
+        self.context_store.set_current_issue(issue_url, Some(issue_id.to_string()));
+
         // 1. Acquire local lock
         self.workspace.create_issue_dir(repo, issue_id)?;
         let _local_lock = self.workspace.acquire_lock(repo, issue_id)?;
@@ -207,6 +224,9 @@ impl Orchestrator {
 
         // 3. Release GitHub lock (label)
         github.remove_label(issue_id, &self.config.lock_label).await?;
+
+        // Clear current issue from context store
+        self.context_store.clear_current_issue();
 
         result
     }
