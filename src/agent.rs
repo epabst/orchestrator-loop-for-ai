@@ -23,7 +23,7 @@ impl Agent {
         current_dir: Option<PathBuf>
     ) -> Result<String> {
         // Support {prompt} placeholder: if present, inject prompt as a CLI arg
-        // rather than writing to stdin. This is needed for tools like `agy --print {prompt}`.
+        // rather than writing to stdin. This is needed for tools like `claude --print {prompt}`.
         let use_prompt_arg = self.command_line.contains("{prompt}");
         let resolved_command = if use_prompt_arg {
             self.command_line.replace("{prompt}", prompt)
