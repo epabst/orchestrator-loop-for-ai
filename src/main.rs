@@ -3,6 +3,8 @@ mod github;
 mod workspace;
 mod agent;
 mod sdlc;
+mod issue_context;
+mod signal_handler;
 
 use clap::Parser;
 use anyhow::Result;
