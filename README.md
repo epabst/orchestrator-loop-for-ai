@@ -2,6 +2,16 @@
 
 A Rust-based CLI tool that manages an AI-driven software development lifecycle (SDLC) using GitHub issues as the state controller.
 
+This is a script that runs in a loop to poll for work to do (e.g., GitHub issues) and invokes AI agents for each phase of the software development lifecycle (SDLC).
+
+## Overview
+
+The Orchestrator Loop for AI automates software development tasks by:
+1. **Polling** external sources (e.g., GitHub) for new tasks/issues
+2. **Orchestrating** tasks through a deterministic state machine
+3. **Delegating** work to specialized AI agents based on the current SDLC phase
+4. **Managing state** persistence and transitions
+
 ## Features
 
 - **GitHub-First Workflow:** Uses GitHub labels and comments to drive the SDLC.
@@ -18,6 +28,42 @@ A Rust-based CLI tool that manages an AI-driven software development lifecycle (
 - **Configurable Agents:** Map different SDLC states to different AI agents (defaulting to `agy`).
 - **Flexible Prompt Delivery:** Supports both stdin-based agents (e.g., `gemini`) and CLI-argument-based agents (e.g., `agy`) via the `{prompt}` placeholder.
 - **Cross-platform:** Works on Windows, Mac, and Linux.
+
+## System Architecture
+
+### Core Components
+- **WorkPoller:** Interfaces with external sources (GitHub, local files) to fetch tasks
+- **TaskOrchestrator:** Central coordinator managing state transitions and task lifecycle
+- **AgentManager:** Executes delegated tasks using registered AI agents
+- **StateEngine:** Persists task state and history using JSON storage
+- **VisualizationModule:** Generates and maintains Mermaid state diagrams
+
+### Supported SDLC States
+- `ai-requirements` - Initial state for new tasks
+- `ai-design` - Design phase
+- `ai-development` - Development/implementation phase
+- `ai-review` - Code review phase
+- `ai-pr-creation` - Pull request creation phase
+- `ai-done` - Task completion
+- `ai-human-help` - Escalation state for exceptions
+
+## State Transitions
+
+```mermaid
+stateDiagram-v2
+    ai-requirements --> ai-design
+    ai-design --> ai-development
+    ai-development --> ai-review
+    ai-review --> ai-pr-creation
+    ai-pr-creation --> ai-done
+    ai-requirements --> ai-human-help
+    ai-design --> ai-human-help
+    ai-development --> ai-human-help
+    ai-review --> ai-human-help
+    ai-pr-creation --> ai-human-help
+```
+
+Each state represents a phase in the software development lifecycle. On successful task execution, the orchestrator transitions to the next state. On failure, the task escalates to `ai-human-help` for manual intervention.
 
 ## Prerequisites
 
