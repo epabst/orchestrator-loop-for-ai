@@ -3,9 +3,11 @@ states:
     label: ai-requirements
     prompt_suffix: |
       Create a brief requirements summary (500-1500 characters maximum).
-      Focus only on: what must the software do? (functional requirements) and what constraints exist? (performance, compatibility, scope).
-      Do NOT include architectural or design details.
-      Format: Start with "## Requirements Summary" then list 5-8 bullet points. That's it.
+      Focus on:
+      • Functional requirements: what must the software do?
+      • Constraints: performance, compatibility, scope
+      Do NOT: architectural details, design decisions
+      Format: Start with "## Requirements Summary" then 5-8 bullet points only.
       Include the keyword "COMPLETED_REQUIREMENTS" when done.
     next_state: ai-design
     keywords:
@@ -17,9 +19,12 @@ states:
     label: ai-design
     prompt_suffix: |
       Create a brief design summary (1000-2000 characters maximum).
-      Describe: architecture (how components interact), key implementation approach, and main technical decisions.
-      Do NOT list requirements again or include long specifications.
-      Format: Start with "## Design Summary" then include 2-3 paragraphs describing the high-level approach and critical design choices.
+      Focus on:
+      • Architecture: how components interact
+      • Implementation approach: key strategy and pattern
+      • Technical decisions: critical choices and trade-offs
+      Do NOT: list requirements, include long specifications
+      Format: Start with "## Design Summary" then use bullet points for all details
       Include the keyword "COMPLETED_DESIGN" when done.
     next_state: ai-development
     keywords:
@@ -30,9 +35,13 @@ states:
   - name: ai-development
     label: ai-development
     prompt_suffix: |
-      Implement the design. Write failing tests first, then implement code to pass them.
-      Output a brief summary (300-800 characters): what you built and key implementation notes.
-      Do NOT output test results or long code dumps.
+      Implement the design:
+      • Write failing tests first
+      • Implement code to pass tests
+      Output a brief summary (300-800 characters) with bullet points:
+      • What you built
+      • Key implementation notes
+      Do NOT: test results, long code dumps
       Include the keyword "COMPLETED_DEVELOPMENT" when done.
     next_state: ai-review
     keywords:
@@ -42,10 +51,13 @@ states:
   - name: ai-review
     label: ai-review
     prompt_suffix: |
-      Review the code against requirements and design. Keep review to 500-1500 characters maximum.
-      Only report: pass/fail verdict, 1-2 critical issues if any, and overall quality note.
-      Do NOT do a line-by-line analysis or list minor issues.
-      Include the keyword "REVIEW_PASSED" if ready, "REVIEW_FAILED" if needs more work, or "NEED_HUMAN_HELP" for questions.
+      Review the code against requirements and design (500-1500 characters maximum).
+      Format as bullet points:
+      • Pass/fail verdict
+      • 1-2 critical issues (if any)
+      • Overall quality note
+      Do NOT: line-by-line analysis, minor issues
+      Include: "REVIEW_PASSED" if ready, "REVIEW_FAILED" if needs work, "NEED_HUMAN_HELP" for questions
     next_state: ai-pr-creation
     keywords:
       success: REVIEW_PASSED
@@ -55,16 +67,17 @@ states:
   - name: ai-pr-creation
     label: ai-pr-creation
     prompt_suffix: |
-      Ensure your code is ready for PR. Do NOT perform git operations—the Orchestrator handles that.
-      Output the PR request in this exact format (PR body: 300-800 characters maximum):
+      Ensure code is ready for PR (do NOT perform git operations—Orchestrator handles that).
+      Output PR request in this exact format (body max 300-800 characters):
 
       PR_REQUESTED
       Title: <Brief title>
       Body:
-      <2-3 sentences describing what changed and why>
+      • What changed
+      • Why it changed
       END_PR_REQUEST
 
-      Keep the body brief. Only include what's essential. Include the keyword "CHANGES_SUMMARIZED" when done.
+      Use bullet format for body. Keep brief—only essentials. Include the keyword "CHANGES_SUMMARIZED" when done.
     next_state: ai-done
     keywords:
       success: CHANGES_SUMMARIZED
