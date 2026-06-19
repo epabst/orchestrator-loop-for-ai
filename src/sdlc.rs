@@ -482,9 +482,10 @@ impl Orchestrator {
                     
                     if let Some(t_idx) = pr_details.find(title_pattern) {
                         let t_start = t_idx + title_pattern.len();
-                        let b_start = pr_details.find(body_pattern).map(|i| i + body_pattern.len()).unwrap_or(pr_details.len());
-                        
-                        let title = pr_details[t_start..b_start].trim().to_string();
+                        let b_idx = pr_details.find(body_pattern).unwrap_or(pr_details.len());
+                        let b_start = b_idx + body_pattern.len();
+
+                        let title = pr_details[t_start..b_idx].trim().to_string();
                         let clean_body = pr_details[b_start..].trim().replace("CHANGES_SUMMARIZED", "").trim().to_string();
                         let issue_url = format!("https://github.com/{}/{}/issues/{}", self.github.owner, repo, issue.number);
                         let body = format!("{}\n\n---\nRelated issue: {}", clean_body, issue_url);
