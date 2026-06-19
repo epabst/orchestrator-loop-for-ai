@@ -5,6 +5,7 @@ mod agent;
 mod sdlc;
 mod issue_context;
 mod signal_handler;
+mod html_fixer;
 mod readme_tests;
 
 use clap::Parser;
