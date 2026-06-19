@@ -66,22 +66,23 @@ states:
       Prepare a PR that represents ALL changes as a single atomic unit (300-800 char body).
 
       Steps:
-      1. cd into the repository directory (use its name from issue_context.txt)
-      2. Run: git log origin/main.. --oneline (to list all commits on this branch)
-      3. Run: git diff origin/main (to view ALL changes as a unified whole)
-      4. Synthesize a PR title that covers the PRIMARY goal across all commits
-      5. Summarize what changed and why (one unified narrative, not per-commit)
+      1. Look at the listed files above to find the repository directory name
+      2. cd into that repository directory
+      3. Run: git log origin/main.. --oneline (to list all commits on this branch)
+      4. Run: git diff origin/main (to view ALL changes as a unified whole)
+      5. Analyze all commits together and synthesize a PR title covering the PRIMARY goal
+      6. Create a summary explaining what changed and why (single unified narrative)
 
       Output format (CRITICAL: each line must match exactly):
       PR_REQUESTED
       Title: <Brief title summarizing the complete set of changes>
       Body:
-      • What was implemented/fixed (single unified summary)
+      • What was implemented/fixed (single unified summary across all commits)
       • Key changes across all commits (briefly)
       • Why these changes were needed
       END_PR_REQUEST
 
-      IMPORTANT: Never use a single commit message as the PR title. ALWAYS analyze the full diff and all commits together to create a title that reflects the entire work as one atomic unit. Include "CHANGES_SUMMARIZED" when done.
+      CRITICAL: Never copy a single commit message as the PR title. ALWAYS analyze the full diff and all commits together to create a PR title and description that reflects the entire work as one atomic unit. Include "CHANGES_SUMMARIZED" when done.
     next_state: ai-done
     keywords:
       CHANGES_SUMMARIZED: ai-done
