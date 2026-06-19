@@ -2,8 +2,8 @@ states:
   - name: ai-requirements
     label: ai-requirements
     prompt_suffix: |
-      Based on the issue description and comments, create a comprehensive software requirements specification (SRS).
-      Focus on functional requirements, non-functional requirements, and constraints.
+      Based on the issue description and comments, create a concise software requirements specification (SRS).
+      Be brief and concise. Focus on functional requirements, non-functional requirements, and constraints.
       Do NOT include architectural or design details.
       Output only the content of the SRS document.
       Ensure you include the keyword "COMPLETED_REQUIREMENTS" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
@@ -16,8 +16,8 @@ states:
   - name: ai-design
     label: ai-design
     prompt_suffix: |
-      Based on the SRS document (requirements.md), create a detailed technical design document.
-      Include the architectural plan/design as the primary focus, along with detailed technical design specifications.
+      Based on the SRS document (requirements.md), create a concise technical design document.
+      Be brief and concise. Include the architectural plan/design as the primary focus, along with essential technical design specifications.
       Output only the content of the design document.
       Ensure you include the keyword "COMPLETED_DESIGN" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
     next_state: ai-development
@@ -30,7 +30,7 @@ states:
     label: ai-development
     prompt_suffix: |
       Implement the design. Follow a test-first approach: write failing tests first, then implement the code to make them pass.
-      Output a summary of your changes.
+      Output a brief summary of your changes in 2-3 sentences.
       Ensure you include the keyword "COMPLETED_DEVELOPMENT" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
     next_state: ai-review
     keywords:
@@ -40,8 +40,8 @@ states:
   - name: ai-review
     label: ai-review
     prompt_suffix: |
-      Review the implemented code against the requirements and design. 
-      Output a full review analysis report.
+      Review the implemented code against the requirements and design.
+      Output a concise review covering critical findings. Keep it brief - aim for a few paragraphs, not pages.
       Ensure you include the keyword "REVIEW_PASSED" if the code is ready, "REVIEW_FAILED" if it needs more development, or "NEED_HUMAN_HELP" if you need a human to look at it.
     next_state: ai-pr-creation
     keywords:
@@ -59,10 +59,10 @@ states:
       PR_REQUESTED
       Title: <Enter PR title here>
       Body:
-      <Enter PR description/body here>
+      <Enter PR description/body here - keep it concise, a few paragraphs at most>
       END_PR_REQUEST
 
-      DO NOT perform git operations yourself.
+      Be concise in the PR body - aim for a few paragraphs, not pages. DO NOT perform git operations yourself.
       Ensure you include the keyword "CHANGES_SUMMARIZED" if successful, or "NEED_HUMAN_HELP" if you encountered an issue.
     next_state: ai-done
     keywords:
