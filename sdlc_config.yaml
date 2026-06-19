@@ -1,7 +1,7 @@
 states:
   - name: ai-requirements
     label: ai-requirements
-    prompt_suffix: |
+    prompt: |
       Create a brief requirements summary (500-1500 characters maximum).
       Focus on:
       • Functional requirements: what must the software do?
@@ -11,13 +11,12 @@ states:
       Include the keyword "COMPLETED_REQUIREMENTS" when done.
     next_state: ai-design
     keywords:
-      success: COMPLETED_REQUIREMENTS
-      failure: NEED_HUMAN_HELP
+      COMPLETED_REQUIREMENTS: ai-design
     doc_file: requirements.md
 
   - name: ai-design
     label: ai-design
-    prompt_suffix: |
+    prompt: |
       Create a brief design summary (1000-2000 characters maximum).
       Focus on:
       • Architecture: how components interact
@@ -28,13 +27,12 @@ states:
       Include the keyword "COMPLETED_DESIGN" when done.
     next_state: ai-development
     keywords:
-      success: COMPLETED_DESIGN
-      failure: NEED_HUMAN_HELP
+      COMPLETED_DESIGN: ai-development
     doc_file: design.md
 
   - name: ai-development
     label: ai-development
-    prompt_suffix: |
+    prompt: |
       Implement the design:
       • Write failing tests first
       • Implement code to pass tests
@@ -45,12 +43,11 @@ states:
       Include the keyword "COMPLETED_DEVELOPMENT" when done.
     next_state: ai-review
     keywords:
-      success: COMPLETED_DEVELOPMENT
-      failure: NEED_HUMAN_HELP
+      COMPLETED_DEVELOPMENT: ai-review
 
   - name: ai-review
     label: ai-review
-    prompt_suffix: |
+    prompt: |
       Review the code against requirements and design (500-1500 characters maximum).
       Format as bullet points:
       • Pass/fail verdict
@@ -60,13 +57,12 @@ states:
       Include: "REVIEW_PASSED" if ready, "REVIEW_FAILED" if needs work, "NEED_HUMAN_HELP" for questions
     next_state: ai-pr-creation
     keywords:
-      success: REVIEW_PASSED
-      back: REVIEW_FAILED
-      failure: NEED_HUMAN_HELP
+      REVIEW_PASSED: ai-pr-creation
+      REVIEW_FAILED: ai-development
 
   - name: ai-pr-creation
     label: ai-pr-creation
-    prompt_suffix: |
+    prompt: |
       Ensure code is ready for PR (do NOT perform git operations—Orchestrator handles that).
       Output PR request in this exact format (body max 300-800 characters):
 
@@ -80,16 +76,18 @@ states:
       Use bullet format for body. Keep brief—only essentials. Include the keyword "CHANGES_SUMMARIZED" when done.
     next_state: ai-done
     keywords:
-      success: CHANGES_SUMMARIZED
-      failure: NEED_HUMAN_HELP
+      CHANGES_SUMMARIZED: ai-done
 
   - name: ai-done
     label: ai-done
-    prompt_suffix: |
+    prompt: |
       The task is completed.
     keywords:
-      success: DONE
+      DONE: ai-done
 
+failure_label: ai-human-help
 human_help_label: ai-human-help
 lock_label: ai-processing
 enabled_label: ai-enabled
+pr_defined_keyword: CHANGES_SUMMARIZED
+merge_conflict_keyword: MERGE_RESOLVED

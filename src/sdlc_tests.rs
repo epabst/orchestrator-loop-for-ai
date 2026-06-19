@@ -228,3 +228,29 @@ fn test_escape_html_empty_string() {
     let expected = "";
     assert_eq!(escape_html(input), expected);
 }
+
+#[test]
+fn test_transition_format_single_label() {
+    let source_state = "ai-design";
+    let destination_labels = vec!["ai-development".to_string()];
+    let keyword = "PROCEED";
+
+    let destination_str = destination_labels.join(", ");
+    let transition_line = format!("**Transition:** {} -> {} (keyword: {})",
+                                   source_state, destination_str, keyword);
+
+    assert_eq!(transition_line, "**Transition:** ai-design -> ai-development (keyword: PROCEED)");
+}
+
+#[test]
+fn test_transition_format_multi_label() {
+    let source_state = "ai-design";
+    let destination_labels = vec!["ai-development".to_string(), "ai-human-help".to_string()];
+    let keyword = "NEEDS_REVIEW";
+
+    let destination_str = destination_labels.join(", ");
+    let transition_line = format!("**Transition:** {} -> {} (keyword: {})",
+                                   source_state, destination_str, keyword);
+
+    assert_eq!(transition_line, "**Transition:** ai-design -> ai-development, ai-human-help (keyword: NEEDS_REVIEW)");
+}
