@@ -2,11 +2,11 @@ states:
   - name: ai-requirements
     label: ai-requirements
     prompt_suffix: |
-      Based on the issue description and comments, create a concise software requirements specification (SRS).
-      Be brief and concise. Focus on functional requirements, non-functional requirements, and constraints.
+      Create a brief requirements summary (500-1500 characters maximum).
+      Focus only on: what must the software do? (functional requirements) and what constraints exist? (performance, compatibility, scope).
       Do NOT include architectural or design details.
-      Output only the content of the SRS document.
-      Ensure you include the keyword "COMPLETED_REQUIREMENTS" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
+      Format: Start with "## Requirements Summary" then list 5-8 bullet points. That's it.
+      Include the keyword "COMPLETED_REQUIREMENTS" when done.
     next_state: ai-design
     keywords:
       success: COMPLETED_REQUIREMENTS
@@ -16,10 +16,11 @@ states:
   - name: ai-design
     label: ai-design
     prompt_suffix: |
-      Based on the SRS document (requirements.md), create a concise technical design document.
-      Be brief and concise. Include the architectural plan/design as the primary focus, along with essential technical design specifications.
-      Output only the content of the design document.
-      Ensure you include the keyword "COMPLETED_DESIGN" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
+      Create a brief design summary (1000-2000 characters maximum).
+      Describe: architecture (how components interact), key implementation approach, and main technical decisions.
+      Do NOT list requirements again or include long specifications.
+      Format: Start with "## Design Summary" then include 2-3 paragraphs describing the high-level approach and critical design choices.
+      Include the keyword "COMPLETED_DESIGN" when done.
     next_state: ai-development
     keywords:
       success: COMPLETED_DESIGN
@@ -29,9 +30,10 @@ states:
   - name: ai-development
     label: ai-development
     prompt_suffix: |
-      Implement the design. Follow a test-first approach: write failing tests first, then implement the code to make them pass.
-      Output a brief summary of your changes in 2-3 sentences.
-      Ensure you include the keyword "COMPLETED_DEVELOPMENT" if you are done, or "NEED_HUMAN_HELP" if you need clarification.
+      Implement the design. Write failing tests first, then implement code to pass them.
+      Output a brief summary (300-800 characters): what you built and key implementation notes.
+      Do NOT output test results or long code dumps.
+      Include the keyword "COMPLETED_DEVELOPMENT" when done.
     next_state: ai-review
     keywords:
       success: COMPLETED_DEVELOPMENT
@@ -40,9 +42,10 @@ states:
   - name: ai-review
     label: ai-review
     prompt_suffix: |
-      Review the implemented code against the requirements and design.
-      Output a concise review covering critical findings. Keep it brief - aim for a few paragraphs, not pages.
-      Ensure you include the keyword "REVIEW_PASSED" if the code is ready, "REVIEW_FAILED" if it needs more development, or "NEED_HUMAN_HELP" if you need a human to look at it.
+      Review the code against requirements and design. Keep review to 500-1500 characters maximum.
+      Only report: pass/fail verdict, 1-2 critical issues if any, and overall quality note.
+      Do NOT do a line-by-line analysis or list minor issues.
+      Include the keyword "REVIEW_PASSED" if ready, "REVIEW_FAILED" if needs more work, or "NEED_HUMAN_HELP" for questions.
     next_state: ai-pr-creation
     keywords:
       success: REVIEW_PASSED
@@ -52,18 +55,16 @@ states:
   - name: ai-pr-creation
     label: ai-pr-creation
     prompt_suffix: |
-      Finalize the changes made for this issue.
-      Ensure your code is ready. The Orchestrator will automatically commit, rebase, push, and create/update the Pull Request for you.
-      Output the PR request using the following exact format:
+      Ensure your code is ready for PR. Do NOT perform git operations—the Orchestrator handles that.
+      Output the PR request in this exact format (PR body: 300-800 characters maximum):
 
       PR_REQUESTED
-      Title: <Enter PR title here>
+      Title: <Brief title>
       Body:
-      <Enter PR description/body here - keep it concise, a few paragraphs at most>
+      <2-3 sentences describing what changed and why>
       END_PR_REQUEST
 
-      Be concise in the PR body - aim for a few paragraphs, not pages. DO NOT perform git operations yourself.
-      Ensure you include the keyword "CHANGES_SUMMARIZED" if successful, or "NEED_HUMAN_HELP" if you encountered an issue.
+      Keep the body brief. Only include what's essential. Include the keyword "CHANGES_SUMMARIZED" when done.
     next_state: ai-done
     keywords:
       success: CHANGES_SUMMARIZED
