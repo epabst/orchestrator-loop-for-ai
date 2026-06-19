@@ -51,16 +51,24 @@ The Orchestrator Loop for AI automates software development tasks by:
 
 ```mermaid
 stateDiagram-v2
+    [*] --> ai-requirements
+    
     ai-requirements --> ai-design
-    ai-design --> ai-development
-    ai-development --> ai-review
-    ai-review --> ai-pr-creation
-    ai-pr-creation --> ai-done
     ai-requirements --> ai-human-help
+    
+    ai-design --> ai-development
     ai-design --> ai-human-help
+    
+    ai-development --> ai-review
     ai-development --> ai-human-help
+    
+    ai-review --> ai-pr-creation
     ai-review --> ai-human-help
+    
+    ai-pr-creation --> ai-done
     ai-pr-creation --> ai-human-help
+    
+    ai-done --> [*]
 ```
 
 Each state represents a phase in the software development lifecycle. On successful task execution, the orchestrator transitions to the next state. On failure, the task escalates to `ai-human-help` for manual intervention.
