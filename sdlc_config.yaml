@@ -63,17 +63,25 @@ states:
   - name: ai-pr-creation
     label: ai-pr-creation
     prompt: |
-      Ensure code is ready for PR (do NOT perform git operations—Orchestrator handles that).
-      Output PR request in this exact format (body max 300-800 characters):
+      Prepare a PR that represents ALL changes as a single atomic unit (300-800 char body).
 
+      Steps:
+      1. cd into the repository directory (use its name from issue_context.txt)
+      2. Run: git log origin/main.. --oneline (to list all commits on this branch)
+      3. Run: git diff origin/main (to view ALL changes as a unified whole)
+      4. Synthesize a PR title that covers the PRIMARY goal across all commits
+      5. Summarize what changed and why (one unified narrative, not per-commit)
+
+      Output format (CRITICAL: each line must match exactly):
       PR_REQUESTED
-      Title: <Brief title>
+      Title: <Brief title summarizing the complete set of changes>
       Body:
-      • What changed
-      • Why it changed
+      • What was implemented/fixed (single unified summary)
+      • Key changes across all commits (briefly)
+      • Why these changes were needed
       END_PR_REQUEST
 
-      Use bullet format for body. Keep brief—only essentials. Include the keyword "CHANGES_SUMMARIZED" when done.
+      IMPORTANT: Never use a single commit message as the PR title. ALWAYS analyze the full diff and all commits together to create a title that reflects the entire work as one atomic unit. Include "CHANGES_SUMMARIZED" when done.
     next_state: ai-done
     keywords:
       CHANGES_SUMMARIZED: ai-done
