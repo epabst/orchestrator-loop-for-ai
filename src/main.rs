@@ -5,6 +5,7 @@ mod agent;
 mod sdlc;
 mod issue_context;
 mod signal_handler;
+mod readme_tests;
 
 use clap::Parser;
 use anyhow::Result;
