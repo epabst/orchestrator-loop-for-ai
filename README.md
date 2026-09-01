@@ -268,6 +268,24 @@ state_agents: {}
 
 `--permission-mode acceptEdits` covers file writes; the `allow` list covers shell commands. Both are needed — `acceptEdits` alone still blocks `Bash`.
 
+**Command form matters as much as the allow-list.** Two of Claude Code's own
+rules sit in front of the grants above, and an agent that trips them sees
+"requires approval", not a shell error:
+
+| Form | Result |
+| --- | --- |
+| `cd <repo> && ./gradlew desktopTest` | allowed — relative path, inside the workspace |
+| `cd /guessed/path && ./gradlew desktopTest` | refused — `cd` outside the working directory |
+| `<repo>/gradlew -p <repo> desktopTest` | refused — the grant is `Bash(./gradlew:*)`, not a path-qualified wrapper |
+| `git -C <repo> log` | allowed |
+| `cd <repo> && git log` | refused — a directory change before `git` can run untrusted hooks |
+
+So the orchestrator's prompt names the workspace and the checkout by absolute
+path, and `sdlc-dev.md` tells the agent to use those paths verbatim and to reach
+the build wrapper with `cd <repo> && ./gradlew`. Without that, an agent that
+invents a path from the branch name (`~/ai-workspaces/issue-54/<repo>`) has its
+verification silently refused and reports the work as untested.
+
 > **Note:** a `permissions:` block inside the agent's own frontmatter is **silently ignored** (verified on Claude Code 2.1.252 — a frontmatter `deny` of `Bash(git:*)` failed to block `git`). Permissions must be supplied via `--settings`, `--permission-mode`, or `--allowedTools`. Frontmatter is for behavior only.
 
 **Other agents.** `agy` takes `--dangerously-skip-permissions`, as shown above. For `gemini`, the orchestrator sets `GEMINI_CLI_TRUST_WORKSPACE=true` automatically on every invocation, so no extra configuration is needed.

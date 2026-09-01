@@ -14,6 +14,32 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// Builds the header that tells the agent exactly where it is working.
+///
+/// The agent runs non-interactively with a permission allow-list, and Claude
+/// Code refuses a `cd` outside the session's working directory. An agent that
+/// guesses an absolute path (for example, from the branch name) therefore gets
+/// its build and test commands refused rather than run, and reports the work
+/// as unverified. So name the workspace and the checkout by absolute path, and
+/// spell out the command forms that are allowed to reach them.
+fn build_workspace_header(issue_dir: &std::path::Path, repo: &str) -> String {
+    let workspace = issue_dir.display();
+    let checkout = issue_dir.join(repo);
+    format!(
+        "Your working directory is '{workspace}'.\n\
+         The repository checkout is at '{checkout}' — that exact path, and no\n\
+         other. Never guess a different location from the branch name or the\n\
+         issue number; a `cd` outside the working directory is refused.\n\n\
+         Run git commands as `git -C {repo} ...`, and run build or test commands\n\
+         from inside the checkout (`cd {repo} && ./gradlew ...`) so wrapper\n\
+         scripts resolve.\n\n\
+         Files available in the working directory:\n",
+        workspace = workspace,
+        checkout = checkout.display(),
+        repo = repo,
+    )
+}
+
 pub struct Orchestrator {
     pub config: SdlcConfig,
     pub github: GithubClient,
@@ -543,7 +569,7 @@ impl Orchestrator {
         
         let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         
-        prompt.push_str("You have access to the following files in the current directory:\n");
+        prompt.push_str(&build_workspace_header(&issue_dir, repo));
         prompt.push_str("- 'issue_context.txt' (Contains issue description and recent comments)\n");
         prompt.push_str(&format!("- '{}' (Repository directory)\n", repo));
 

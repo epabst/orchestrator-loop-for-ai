@@ -253,3 +253,23 @@ fn test_transition_format_multi_label() {
 
     assert_eq!(transition_line, "**Transition:** ai-design -> ai-development, ai-human-help (keyword: NEEDS_REVIEW)");
 }
+
+#[test]
+fn test_workspace_header_names_the_checkout_by_absolute_path() {
+    let issue_dir = std::path::Path::new("/Users/dev/ai-workspaces/breakthrough-path-54");
+    let header = build_workspace_header(issue_dir, "breakthrough-path");
+
+    assert!(header.contains("'/Users/dev/ai-workspaces/breakthrough-path-54'"));
+    assert!(header.contains("'/Users/dev/ai-workspaces/breakthrough-path-54/breakthrough-path'"));
+}
+
+#[test]
+fn test_workspace_header_gives_allowed_command_forms() {
+    let issue_dir = std::path::Path::new("/Users/dev/ai-workspaces/my-repo-7");
+    let header = build_workspace_header(issue_dir, "my-repo");
+
+    assert!(header.contains("git -C my-repo"));
+    assert!(header.contains("cd my-repo && ./gradlew"));
+    assert!(header.contains("Never guess a different location"));
+    assert!(header.trim_end().ends_with("Files available in the working directory:"));
+}
