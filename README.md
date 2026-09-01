@@ -86,6 +86,7 @@ Each state represents a phase in the software development lifecycle. On successf
     - **Contents**: Read and write
   - For **all-repos mode** (no `--repo` flag), select "All repositories" and grant the same permissions across all repos you want managed.
 - An AI Agent CLI installed and configured. The default is [`agy`](https://github.com/antgravity/agy).
+  - The agent runs unattended, so it must be granted tool permissions up front — see [Agent permissions](#agent-permissions).
 
 ## Installation
 
@@ -138,6 +139,77 @@ agents:
 state_agents:
   ai-review: gemini
 ```
+
+#### Agent permissions
+
+The orchestrator invokes the agent non-interactively, so **there is no human available to approve tool prompts**. Any tool call that would normally ask for approval is denied instead, and the agent reports the task as blocked rather than doing the work. The failure shows up in the audit log (`~/ai-workspaces/audit/<repo>/<issue>/`) and looks like this:
+
+```
+I could not complete the implementation — all file writes and build/test
+commands are blocked in this session, so nothing was changed on disk.
+```
+
+This is easy to misread as a code or sync problem: the review state sees an unchanged working tree and reports `NEED_HUMAN_HELP`, which parks the issue behind the `ai-human-help` label. Grant permissions up front so it cannot happen.
+
+At minimum the agent needs:
+
+| Capability | Why the SDLC states need it |
+| --- | --- |
+| Read, write, edit, glob, grep | `ai-development` implements; every state reads the repo |
+| `git` | branch, commit, and push the issue branch |
+| `gh` | read the issue, create and update the PR in `ai-pr-creation` |
+| Build and test toolchain | `ai-development` is required to verify its own work |
+
+Deny the rest — `sudo`, force-pushes to `main`, repository deletion, and reads of `.env`, `~/.ssh` and `~/.aws`. A broad allow-list beats blanket bypass here, because the agent is acting on real branches unattended.
+
+**Claude.** Permissions come from a settings file, and behavior from an agent definition:
+
+1. `~/.claude/agents/sdlc-dev.md` — the agent's operating instructions: never stop to ask for approval, `cd` into the repository subdirectory, verify by actually building and testing, and emit the state's completion keyword exactly so the state machine can advance.
+2. `~/ai-workspaces/sdlc-agent-settings.json` — the permission grants:
+
+```json
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read", "Write", "Edit", "Glob", "Grep",
+      "Bash(git:*)", "Bash(gh:*)",
+      "Bash(./gradlew:*)", "Bash(cargo:*)", "Bash(npm:*)", "Bash(python3:*)"
+    ],
+    "deny": [
+      "Bash(sudo:*)",
+      "Bash(git push --force origin main:*)",
+      "Bash(gh repo delete:*)",
+      "Read(./.env)",
+      "Read(~/.ssh/**)"
+    ]
+  }
+}
+```
+
+3. Wire both into `command_template`:
+
+```yaml
+command_template: claude --print --agent {agent} --settings /Users/you/ai-workspaces/sdlc-agent-settings.json --permission-mode acceptEdits {prompt}
+agents:
+  default: sdlc-dev
+state_agents: {}
+```
+
+`--permission-mode acceptEdits` covers file writes; the `allow` list covers shell commands. Both are needed — `acceptEdits` alone still blocks `Bash`.
+
+> **Note:** a `permissions:` block inside the agent's own frontmatter is **silently ignored** (verified on Claude Code 2.1.252 — a frontmatter `deny` of `Bash(git:*)` failed to block `git`). Permissions must be supplied via `--settings`, `--permission-mode`, or `--allowedTools`. Frontmatter is for behavior only.
+
+**Other agents.** `agy` takes `--dangerously-skip-permissions`, as shown above. For `gemini`, the orchestrator sets `GEMINI_CLI_TRUST_WORKSPACE=true` automatically on every invocation, so no extra configuration is needed.
+
+Whatever agent you use, verify the grants before starting a real run — a five-second check beats a state machine that silently makes no progress:
+
+```bash
+cd ~/ai-workspaces && <your command_template, with a test prompt> \
+  'Report ALLOWED or BLOCKED for each: (1) write a file proof.txt, (2) run `git status`, (3) run `gh --version`, (4) run `sudo -n true`.'
+```
+
+Expect the first three to be allowed and `sudo` to be blocked. If a write is blocked, the permission wiring is not in effect.
 
 ## Usage
 
