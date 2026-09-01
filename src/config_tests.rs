@@ -194,6 +194,99 @@ enabled_label: enabled
     }
 
     #[test]
+    fn test_native_handler_state_needs_no_prompt_or_keywords() {
+        // A natively handled state runs orchestrator code, so it carries no
+        // agent prompt and no keywords to match in an agent's reply.
+        let yaml = r#"
+states:
+  - name: ai-pr-creation
+    label: ai-pr-creation
+    prompt: "Open a PR"
+    next_state: ai-awaiting-pr-merge
+    keywords:
+      CHANGES_SUMMARIZED: ai-awaiting-pr-merge
+  - name: ai-awaiting-pr-merge
+    label: ai-awaiting-pr-merge
+    native_handler: await-pr-merge
+    next_state: ai-done
+  - name: ai-done
+    label: ai-done
+    prompt: "Done"
+failure_label: ai-human-help
+human_help_label: ai-human-help
+lock_label: ai-processing
+enabled_label: ai-enabled
+"#;
+        let config = SdlcConfig::from_yaml(yaml).unwrap();
+        let waiting = config.await_pr_merge_state().expect("await-pr-merge state");
+
+        assert_eq!(waiting.label, "ai-awaiting-pr-merge");
+        assert_eq!(waiting.prompt, "");
+        assert!(waiting.keywords.is_empty());
+        assert_eq!(config.await_pr_merge_label(), Some("ai-awaiting-pr-merge"));
+        assert_eq!(config.label_after_pr_merge_wait(), "ai-done");
+    }
+
+    #[test]
+    fn test_no_await_pr_merge_state_configured() {
+        // Without the state, callers must see None rather than guess a label.
+        let yaml = r#"
+states:
+  - name: ai-test
+    label: ai-test
+    prompt: "test"
+    keywords:
+      DONE: ai-done
+failure_label: ai-human-help
+human_help_label: ai-human-help
+lock_label: ai-processing
+enabled_label: ai-enabled
+"#;
+        let config = SdlcConfig::from_yaml(yaml).unwrap();
+        assert!(config.await_pr_merge_state().is_none());
+        assert_eq!(config.await_pr_merge_label(), None);
+    }
+
+    #[test]
+    fn test_label_after_merge_wait_follows_next_state_label() {
+        // next_state names a state; the issue gets that state's label.
+        let yaml = r#"
+states:
+  - name: awaiting
+    label: ai-awaiting-pr-merge
+    native_handler: await-pr-merge
+    next_state: shipped
+  - name: shipped
+    label: ai-shipped
+    prompt: "Shipped"
+failure_label: ai-human-help
+human_help_label: ai-human-help
+lock_label: ai-processing
+enabled_label: ai-enabled
+"#;
+        let config = SdlcConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.label_after_pr_merge_wait(), "ai-shipped");
+    }
+
+    #[test]
+    fn test_shipped_config_waits_for_the_merge_before_ai_done() {
+        // The config this repo ships must route PR creation through the merge
+        // wait, or a merged PR never produces a build of main.
+        let yaml = std::fs::read_to_string("sdlc_config.yaml").expect("sdlc_config.yaml");
+        let config = SdlcConfig::from_yaml(&yaml).unwrap();
+
+        let pr_creation = config.get_state("ai-pr-creation").expect("ai-pr-creation state");
+        assert_eq!(
+            pr_creation.get_labels_for_keyword("CHANGES_SUMMARIZED"),
+            vec!["ai-awaiting-pr-merge".to_string()]
+        );
+
+        let waiting = config.await_pr_merge_state().expect("await-pr-merge state");
+        assert_eq!(waiting.label, "ai-awaiting-pr-merge");
+        assert_eq!(config.label_after_pr_merge_wait(), "ai-done");
+    }
+
+    #[test]
     fn test_pr_defined_keyword_defaults() {
         // Test that pr_defined_keyword defaults to CHANGES_SUMMARIZED
         let yaml = r#"

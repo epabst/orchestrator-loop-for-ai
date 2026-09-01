@@ -20,6 +20,20 @@ pub fn repo_slug(issue: &Issue) -> Result<(String, String)> {
     Ok((parts[2].to_string(), parts[3].to_string()))
 }
 
+/// Percent-encodes a label for use in a query string, so a label with spaces or
+/// punctuation still round-trips. Keeps the crate free of an encoding dependency.
+pub fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{:02X}", b),
+        })
+        .collect()
+}
+
 impl GithubClient {
     pub fn new(token: String, owner: String, repo: String) -> Result<Self> {
         let client = Octocrab::builder()
@@ -61,6 +75,29 @@ impl GithubClient {
         let issues: octocrab::Page<Issue> = self.client
             .get("/issues", None::<&()>)
             .await?;
+        Ok(issues.items)
+    }
+
+    /// Assigned issues carrying `label`, open *or* closed. Closing an issue is
+    /// how a human signals the work is over, but an issue waiting on its PR to
+    /// merge still has orchestrator work left, so that state has to keep being
+    /// polled after the close. The label keeps the query small.
+    pub async fn list_assigned_issues_with_label(&self, label: &str) -> Result<Vec<Issue>> {
+        let user = self.get_current_user().await?;
+        let issues = self.client.issues(&self.owner, &self.repo)
+            .list()
+            .assignee(user.as_str())
+            .labels(&[label.to_string()])
+            .state(octocrab::params::State::All)
+            .send()
+            .await?;
+        Ok(issues.items)
+    }
+
+    /// The all-repos twin of `list_assigned_issues_with_label`.
+    pub async fn list_assigned_issues_with_label_in_all_repos(&self, label: &str) -> Result<Vec<Issue>> {
+        let route = format!("/issues?filter=assigned&state=all&labels={}", percent_encode(label));
+        let issues: octocrab::Page<Issue> = self.client.get(&route, None::<&()>).await?;
         Ok(issues.items)
     }
 

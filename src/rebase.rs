@@ -83,6 +83,13 @@ pub fn is_new_merged_pr(state: Option<&RebaseState>, pr_number: u64) -> bool {
     state.map(|s| s.merged_pr != Some(pr_number)).unwrap_or(true)
 }
 
+/// The merged PR this workspace has already published a build of main for, if
+/// any. This is what tells the `await-pr-merge` state its wait is over: the
+/// merge happened *and* the build a human should install exists.
+pub fn published_merge(issue_dir: &Path) -> Option<u64> {
+    read_rebase_state(issue_dir).and_then(|s| s.merged_pr)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenPr {
     pub number: u64,

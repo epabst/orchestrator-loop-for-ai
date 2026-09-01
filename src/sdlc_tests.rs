@@ -273,3 +273,62 @@ fn test_workspace_header_gives_allowed_command_forms() {
     assert!(header.contains("Never guess a different location"));
     assert!(header.trim_end().ends_with("Files available in the working directory:"));
 }
+
+/// The workflow this repo ships, so the label predicate is exercised against
+/// the real state names rather than invented ones.
+fn shipped_config() -> SdlcConfig {
+    let yaml = std::fs::read_to_string("sdlc_config.yaml").expect("sdlc_config.yaml");
+    SdlcConfig::from_yaml(&yaml).unwrap()
+}
+
+fn labels(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| n.to_string()).collect()
+}
+
+#[test]
+fn test_agent_can_advance_an_enabled_issue_mid_workflow() {
+    let config = shipped_config();
+    assert!(agent_can_advance(&labels(&["ai-enabled", "ai-development"]), &config));
+}
+
+#[test]
+fn test_agent_cannot_advance_without_the_enabled_label() {
+    let config = shipped_config();
+    assert!(!agent_can_advance(&labels(&["ai-development"]), &config));
+}
+
+#[test]
+fn test_agent_cannot_advance_a_locked_or_escalated_or_finished_issue() {
+    let config = shipped_config();
+    assert!(!agent_can_advance(&labels(&["ai-enabled", "ai-processing", "ai-development"]), &config));
+    assert!(!agent_can_advance(&labels(&["ai-enabled", "ai-human-help"]), &config));
+    assert!(!agent_can_advance(&labels(&["ai-enabled", "ai-done"]), &config));
+}
+
+#[test]
+fn test_agent_cannot_advance_an_issue_waiting_on_its_pr_to_merge() {
+    // The orchestrator advances this state itself. An agent picking it up would
+    // have no prompt to run, and it would hold the single work slot for as long
+    // as the PR stayed open, starving every other issue.
+    let config = shipped_config();
+    assert!(!agent_can_advance(&labels(&["ai-enabled", "ai-awaiting-pr-merge"]), &config));
+}
+
+#[test]
+fn test_awaiting_state_is_ignored_when_the_workflow_omits_it() {
+    // A workflow without the state must not accidentally exclude anything.
+    let yaml = r#"
+states:
+  - name: ai-development
+    label: ai-development
+    prompt: "Build it"
+    keywords:
+      COMPLETED_DEVELOPMENT: ai-done
+failure_label: ai-human-help
+human_help_label: ai-human-help
+lock_label: ai-processing
+enabled_label: ai-enabled
+"#;
+    let config = SdlcConfig::from_yaml(yaml).unwrap();
+    assert!(agent_can_advance(&labels(&["ai-enabled", "ai-awaiting-pr-merge"]), &config));
+}

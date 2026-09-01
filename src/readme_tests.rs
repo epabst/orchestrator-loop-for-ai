@@ -24,6 +24,7 @@ mod tests {
             "ai-development",
             "ai-review",
             "ai-pr-creation",
+            "ai-awaiting-pr-merge",
             "ai-done",
             "ai-human-help",
         ];
@@ -38,7 +39,8 @@ mod tests {
             "ai-design --> ai-development",
             "ai-development --> ai-review",
             "ai-review --> ai-pr-creation",
-            "ai-pr-creation --> ai-done",
+            "ai-pr-creation --> ai-awaiting-pr-merge",
+            "ai-awaiting-pr-merge --> ai-done",
             "ai-requirements --> ai-human-help",
             "ai-design --> ai-human-help",
             "ai-development --> ai-human-help",

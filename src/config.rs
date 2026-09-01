@@ -71,12 +71,24 @@ impl Default for AutoRebaseConfig {
 pub struct StateConfig {
     pub name: String,
     pub label: String,
-    #[serde(alias = "prompt_suffix")]
+    /// Instructions for the agent. Empty for a natively handled state, which
+    /// runs orchestrator code instead of invoking an agent.
+    #[serde(alias = "prompt_suffix", default)]
     pub prompt: String,
     pub next_state: Option<String>,
+    #[serde(default)]
     pub keywords: HashMap<String, String>,
+    #[serde(default)]
     pub doc_file: Option<String>,
+    /// Names orchestrator code that advances this state instead of an agent.
+    /// The only handler today is `await-pr-merge`.
+    #[serde(default)]
+    pub native_handler: Option<String>,
 }
+
+/// `native_handler` value for the state that waits for the PR to be merged,
+/// publishes a build of main and then moves the issue on to its next state.
+pub const AWAIT_PR_MERGE_HANDLER: &str = "await-pr-merge";
 
 impl SdlcConfig {
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
@@ -86,6 +98,33 @@ impl SdlcConfig {
     #[allow(dead_code)]
     pub fn get_state(&self, label: &str) -> Option<&StateConfig> {
         self.states.iter().find(|s| s.label == label)
+    }
+
+    /// The state whose merge the orchestrator watches for, when one is configured.
+    pub fn await_pr_merge_state(&self) -> Option<&StateConfig> {
+        self.states
+            .iter()
+            .find(|s| s.native_handler.as_deref() == Some(AWAIT_PR_MERGE_HANDLER))
+    }
+
+    /// Label of that state, so callers can test an issue for it without
+    /// caring whether the state is configured at all.
+    pub fn await_pr_merge_label(&self) -> Option<&str> {
+        self.await_pr_merge_state().map(|s| s.label.as_str())
+    }
+
+    /// Label an issue moves to once the merge it was waiting for is published:
+    /// the label of the state's `next_state`, falling back to `ai-done`.
+    pub fn label_after_pr_merge_wait(&self) -> String {
+        let next = self
+            .await_pr_merge_state()
+            .and_then(|s| s.next_state.clone())
+            .unwrap_or_else(|| "ai-done".to_string());
+        self.states
+            .iter()
+            .find(|s| s.name == next)
+            .map(|s| s.label.clone())
+            .unwrap_or(next)
     }
 }
 

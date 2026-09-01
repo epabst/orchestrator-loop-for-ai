@@ -358,6 +358,39 @@ fn test_is_new_merged_pr_gates_on_the_pr_already_handled() {
 }
 
 #[test]
+fn test_published_merge_reports_the_pr_whose_main_build_exists() {
+    let dir = TempDir::new().unwrap();
+    // Nothing recorded yet: the wait for the merge is still on.
+    assert_eq!(published_merge(dir.path()), None);
+
+    // A rebase with no merge behind it does not end the wait either.
+    write_rebase_state(
+        dir.path(),
+        &RebaseState {
+            last_main_sha: "abc123".to_string(),
+            outcome: RebaseOutcome::Rebased,
+            last_published_sha: Some("head1".to_string()),
+            merged_pr: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(published_merge(dir.path()), None);
+
+    // Once the merge is recorded, the issue can move past the wait.
+    write_rebase_state(
+        dir.path(),
+        &RebaseState {
+            last_main_sha: "abc123".to_string(),
+            outcome: RebaseOutcome::Merged,
+            last_published_sha: Some("head1".to_string()),
+            merged_pr: Some(55),
+        },
+    )
+    .unwrap();
+    assert_eq!(published_merge(dir.path()), Some(55));
+}
+
+#[test]
 fn test_switch_to_main_parks_the_checkout_on_the_latest_origin_main() {
     let tmp = TempDir::new().unwrap();
     let repo = setup_repo(tmp.path());

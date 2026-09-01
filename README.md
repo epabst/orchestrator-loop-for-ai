@@ -24,7 +24,7 @@ The Orchestrator Loop for AI automates software development tasks by:
   - `ai-pr-creation`: Automated Pull Request creation.
   - `ai-done`: Completion state.
 - **Concurrency Safety:** Uses both GitHub labels (`ai-processing`) and local file locking to ensure only one instance processes an issue at a time.
-- **Auto-Rebase & Publish:** Every open PR for an `ai-enabled` issue gets a dev build for its current head — published when the PR is created, and again whenever `origin/main` moves and the branch is rebased in its workspace. Once the PR is merged, the workspace switches to `main` and publishes a `*-main.apk` so it is obvious which build to install.
+- **Auto-Rebase & Publish:** Every open PR for an `ai-enabled` issue gets a dev build for its current head — published when the PR is created, and again whenever `origin/main` moves and the branch is rebased in its workspace. The issue then waits in `ai-awaiting-pr-merge`, open or closed, until the PR merges; the workspace switches to `main`, publishes a `*-main.apk` so it is obvious which build to install, and only then is the issue `ai-done`.
 - **Human-in-the-loop:** Easily pause for human help by adding an `ai-human-help` label.
 - **Configurable Agents:** Map different SDLC states to different AI agents (defaulting to `agy`).
 - **Flexible Prompt Delivery:** Supports both stdin-based agents (e.g., `gemini`) and CLI-argument-based agents (e.g., `agy`) via the `{prompt}` placeholder.
@@ -67,13 +67,23 @@ stateDiagram-v2
     ai-review --> ai-pr-creation
     ai-review --> ai-human-help
     
-    ai-pr-creation --> ai-done
+    ai-pr-creation --> ai-awaiting-pr-merge
     ai-pr-creation --> ai-human-help
+    
+    ai-awaiting-pr-merge --> ai-done
     
     ai-done --> [*]
 ```
 
 Each state represents a phase in the software development lifecycle. On successful task execution, the orchestrator transitions to the next state. On failure, the task escalates to `ai-human-help` for manual intervention.
+
+`ai-awaiting-pr-merge` is the one state no agent runs: the orchestrator handles it
+itself (`native_handler: await-pr-merge`). While an issue sits there its PR keeps
+being rebased onto `origin/main` and rebuilt, and once the PR is merged the
+workspace is checked out on `main`, a `*-main` build is published, and only then
+does the issue move to `ai-done`. The orchestrator polls this one state whether the
+issue is open **or closed**, so closing an issue the moment you merge its PR - the
+usual reflex - still leaves the merge build to be published rather than skipping it.
 
 ## Prerequisites
 
@@ -392,11 +402,16 @@ installing is main's. So the workspace is switched over:
    branch build.
 
 The merged PR number is recorded in `.rebase_state.json`, so this happens **once
-per merge**, not on every pass. The orchestrator only polls *open* issues, so the
-issue must still be open and `ai-enabled` when the PR merges; PR bodies therefore
-link the issue (`Related issue: ...`) instead of using a `Closes #<n>` keyword that
-would close it on merge and take the workspace out of the poll before the main
-build ran.
+per merge**, not on every pass. With that recorded, the issue leaves
+`ai-awaiting-pr-merge` for `ai-done` — the merge is only finished once the build
+exists.
+
+The ordinary issue poll asks GitHub for *open* issues only, which used to mean a
+merge went unpublished whenever the issue was closed before the next pass — the
+common case, since closing an issue is the natural thing to do the moment you
+merge its PR. So issues labelled `ai-awaiting-pr-merge` are fetched by a second,
+label-scoped query that ignores open/closed, and stay visible to the rebase pass
+until their main build is published.
 
 ```
 REBASE: PR #99 (issue-7) was merged - moving the checkout to main (07d4f07) for a fresh build
@@ -404,6 +419,7 @@ REBASE: PR #99 (issue-7) was merged - moving the checkout to main (07d4f07) for 
   OK: Checked out main at 07d4f07
   INFO: Running publish-android-dev.sh to publish a build for main (07d4f07)...
   OK: Published a new build for main
+  OK: PR #99 is merged and published - issue #7 moves to ai-done
 REBASE: Pass complete: 0 rebased, 1 merged, 0 conflicted, 0 errored.
 ```
 

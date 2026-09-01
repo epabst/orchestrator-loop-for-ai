@@ -91,9 +91,19 @@ states:
       END_PR_REQUEST
 
       CRITICAL: Never copy a single commit message as the PR title. ALWAYS analyze the full diff and all commits together to create a PR title and description that reflects the entire work as one atomic unit. Include "CHANGES_SUMMARIZED" when done.
-    next_state: ai-done
+    next_state: ai-awaiting-pr-merge
     keywords:
-      CHANGES_SUMMARIZED: ai-done
+      CHANGES_SUMMARIZED: ai-awaiting-pr-merge
+
+  # Handled by the orchestrator itself, not an agent: it keeps the PR rebased
+  # and its build published, and once the PR is merged it checks the workspace
+  # out on main, publishes a *-main build and moves the issue to ai-done. The
+  # issue stays here - and keeps being polled even after a human closes it - so
+  # a merge never goes unpublished.
+  - name: ai-awaiting-pr-merge
+    label: ai-awaiting-pr-merge
+    native_handler: await-pr-merge
+    next_state: ai-done
 
   - name: ai-done
     label: ai-done

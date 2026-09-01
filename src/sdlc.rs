@@ -4,7 +4,7 @@ use crate::workspace::{Workspace};
 use crate::agent::Agent;
 use crate::issue_context::IssueContextStore;
 use crate::signal_handler::OutputGenerator;
-use crate::rebase::{publish_and_report, rebase_in_progress, AutoRebaser, RebaseOutcome};
+use crate::rebase::{publish_and_report, published_merge, rebase_in_progress, AutoRebaser, RebaseOutcome};
 use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
@@ -105,6 +105,27 @@ async fn wait_with_countdown(duration: std::time::Duration, started_at: &str) ->
 
 use chrono::Local;
 
+/// Whether the agent-driven loop can advance this issue, judged from its labels
+/// alone. `ai-done` and the await-PR-merge state both mean "no": the first is
+/// finished, and the second is advanced by the orchestrator itself. Excluding
+/// the second also keeps a long wait for a merge from starving the queue, since
+/// selection hands the single work slot to the first issue that passes here.
+pub fn agent_can_advance(labels: &[String], config: &SdlcConfig) -> bool {
+    let has = |name: &str| labels.iter().any(|l| l == name);
+    let awaits_merge = config.await_pr_merge_label().map(has).unwrap_or(false);
+
+    has(&config.enabled_label)
+        && !has(&config.lock_label)
+        && !has(&config.human_help_label)
+        && !has("ai-done")
+        && !awaits_merge
+}
+
+/// An issue's label names, the form the label predicates work in.
+fn label_names(issue: &Issue) -> Vec<String> {
+    issue.labels.iter().map(|l| l.name.clone()).collect()
+}
+
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -150,7 +171,11 @@ impl Orchestrator {
                         println!("\n{} Shutdown signal received. Exiting.", "INFO:".blue());
                         break;
                     }
-                    _ = self.rebase_open_prs(&issues) => {}
+                    _ = async {
+                        let mut to_check = issues.clone();
+                        to_check.extend(self.issues_awaiting_merge(&issues).await);
+                        self.rebase_open_prs(&to_check).await;
+                    } => {}
                 }
                 self.last_rebase_check = Some(std::time::Instant::now());
             }
@@ -188,7 +213,8 @@ impl Orchestrator {
                                         Ok(updated_issue) => {
                                             // Determine if the new state is terminal
                                             let terminal = updated_issue.labels.iter().any(|l| l.name == "ai-done") ||
-                                                         updated_issue.labels.iter().any(|l| l.name == self.config.human_help_label);
+                                                         updated_issue.labels.iter().any(|l| l.name == self.config.human_help_label) ||
+                                                         self.awaiting_merge(&updated_issue);
                                             self.update_sticky_state(&issue, terminal);
                                         }
                                         Err(e) => {
@@ -247,6 +273,52 @@ impl Orchestrator {
         }
         println!("No issues found to process.");
         Ok(())
+    }
+
+    /// The label of the state that waits on a PR merge, when one is configured.
+    fn awaiting_merge_label(&self) -> Option<&str> {
+        self.config.await_pr_merge_label()
+    }
+
+    /// True while this issue is parked in the await-PR-merge state, which the
+    /// rebase pass advances rather than an agent.
+    fn awaiting_merge(&self, issue: &Issue) -> bool {
+        self.awaiting_merge_label()
+            .map(|label| issue.labels.iter().any(|l| l.name == label))
+            .unwrap_or(false)
+    }
+
+    /// Issues parked in the await-PR-merge state that the ordinary poll missed.
+    /// That poll asks for *open* issues, and closing an issue is the natural
+    /// reflex right after merging its PR, so without this query the merge build
+    /// would never be published. Scoping the query to the one label keeps it
+    /// small, and it only runs on a rebase pass, not on every poll.
+    async fn issues_awaiting_merge(&self, already_listed: &[Issue]) -> Vec<Issue> {
+        let Some(label) = self.awaiting_merge_label() else {
+            return Vec::new();
+        };
+
+        let awaiting = if self.all_repos {
+            self.github.list_assigned_issues_with_label_in_all_repos(label).await
+        } else {
+            self.github.list_assigned_issues_with_label(label).await
+        };
+
+        match awaiting {
+            Ok(awaiting) => awaiting
+                .into_iter()
+                .filter(|issue| {
+                    !already_listed.iter().any(|existing| {
+                        existing.number == issue.number
+                            && existing.repository_url == issue.repository_url
+                    })
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!("{} Could not list {} issues: {}", "WARN:".yellow(), label, e);
+                Vec::new()
+            }
+        }
     }
 
     /// Resolves the owner/repo an issue belongs to, honouring all-repos mode.
@@ -311,6 +383,24 @@ impl Orchestrator {
                     eprintln!("{} Auto-rebase failed for issue #{}: {}", "WARN:".yellow(), issue.number, e);
                 }
             }
+
+            // An issue parked in the await-PR-merge state leaves it once its
+            // merge has actually produced a build of main - which the pass
+            // above just did, or an earlier pass already recorded.
+            if self.awaiting_merge(issue) {
+                let issue_dir = self.workspace.get_issue_dir(&repo, issue.number);
+                if let Some(pr_number) = published_merge(&issue_dir) {
+                    if let Err(e) = self.finish_awaiting_merge(&github, issue, pr_number).await {
+                        failed += 1;
+                        eprintln!(
+                            "{} Could not advance issue #{} past the merge wait: {}",
+                            "WARN:".yellow(),
+                            issue.number,
+                            e
+                        );
+                    }
+                }
+            }
         }
 
         // Stay silent on a pass where every PR was already current.
@@ -324,6 +414,36 @@ impl Orchestrator {
                 failed
             );
         }
+    }
+
+    /// The merge landed and main's build is published, so the wait is over.
+    async fn finish_awaiting_merge(&self, github: &GithubClient, issue: &Issue, pr_number: u64) -> Result<()> {
+        let Some(waiting_label) = self.awaiting_merge_label().map(|l| l.to_string()) else {
+            return Ok(());
+        };
+        let next_label = self.config.label_after_pr_merge_wait();
+
+        github.add_label(issue.number, &next_label).await
+            .map_err(|e| anyhow!("Failed to add label {}: {}", next_label, e))?;
+        github.remove_label(issue.number, &waiting_label).await
+            .map_err(|e| anyhow!("Failed to remove label {}: {}", waiting_label, e))?;
+
+        println!(
+            "  {} PR #{} is merged and published - issue #{} moves to {}",
+            "OK:".green(),
+            pr_number,
+            issue.number,
+            next_label
+        );
+
+        let comment = format!(
+            "**Transition:** {} -> {} (PR #{} merged)\n\nThe merge is in `{}` and a build of `{}` has been published.",
+            waiting_label, next_label, pr_number, self.config.auto_rebase.main_branch, self.config.auto_rebase.main_branch
+        );
+        github.post_comment(issue.number, &comment).await
+            .map_err(|e| anyhow!("Failed to post comment: {}", e))?;
+
+        Ok(())
     }
 
     async fn should_process_issue(&self, issue: &Issue) -> Result<bool> {
@@ -358,22 +478,9 @@ impl Orchestrator {
             return Ok(false);
         }
         
-        // Check for human help label
-        if issue.labels.iter().any(|l| l.name == self.config.human_help_label) {
-            return Ok(false);
-        }
-
-        // Check for ai-processing (lock)
-        if issue.labels.iter().any(|l| l.name == self.config.lock_label) {
-            return Ok(false);
-        }
-
-        // Check if ai-done
-        if issue.labels.iter().any(|l| l.name == "ai-done") {
-            return Ok(false);
-        }
-
-        Ok(true)
+        // Human help, the processing lock, ai-done and the await-PR-merge state
+        // all rule the issue out.
+        Ok(agent_can_advance(&label_names(issue), &self.config))
     }
 
     async fn select_next_issue(&self, issues: Vec<Issue>) -> Option<Issue> {
@@ -390,12 +497,7 @@ impl Orchestrator {
                 })
             }) {
                 // Check if sticky issue still meets processability criteria
-                let has_enabled = sticky_issue.labels.iter().any(|l| l.name == self.config.enabled_label);
-                let has_processing = sticky_issue.labels.iter().any(|l| l.name == self.config.lock_label);
-                let has_human_help = sticky_issue.labels.iter().any(|l| l.name == self.config.human_help_label);
-                let has_done = sticky_issue.labels.iter().any(|l| l.name == "ai-done");
-
-                if has_enabled && !has_processing && !has_human_help && !has_done {
+                if agent_can_advance(&label_names(sticky_issue), &self.config) {
                     return Some(sticky_issue.clone());
                 }
             }
@@ -403,12 +505,7 @@ impl Orchestrator {
 
         // Fallback to first processable issue in standard order
         for issue in issues {
-            let has_enabled = issue.labels.iter().any(|l| l.name == self.config.enabled_label);
-            let has_processing = issue.labels.iter().any(|l| l.name == self.config.lock_label);
-            let has_human_help = issue.labels.iter().any(|l| l.name == self.config.human_help_label);
-            let has_done = issue.labels.iter().any(|l| l.name == "ai-done");
-
-            if has_enabled && !has_processing && !has_human_help && !has_done {
+            if agent_can_advance(&label_names(&issue), &self.config) {
                 return Some(issue);
             }
         }
@@ -806,8 +903,13 @@ impl Orchestrator {
             }
         }
 
-        // Check if this is a terminal state
-        let is_terminal = matched_labels.iter().any(|l| l == "ai-done" || l == &self.config.human_help_label);
+        // Check if this is a terminal state. Handing off to the await-PR-merge
+        // state ends the agent's involvement just as ai-done used to, so the
+        // human still gets the instructions page when the PR is ready.
+        let awaiting_merge = self.awaiting_merge_label().unwrap_or_default().to_string();
+        let is_terminal = matched_labels
+            .iter()
+            .any(|l| l == "ai-done" || l == &self.config.human_help_label || *l == awaiting_merge);
         if is_terminal {
             self.create_and_open_instructions(issue, &self.github.owner, repo, &final_response)?;
         }
