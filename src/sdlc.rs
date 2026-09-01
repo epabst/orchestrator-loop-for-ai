@@ -4,7 +4,7 @@ use crate::workspace::{Workspace};
 use crate::agent::Agent;
 use crate::issue_context::IssueContextStore;
 use crate::signal_handler::OutputGenerator;
-use crate::rebase::{AutoRebaser, RebaseOutcome};
+use crate::rebase::{publish_and_report, AutoRebaser, RebaseOutcome};
 use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
@@ -245,9 +245,12 @@ impl Orchestrator {
 
     /// For every ai-enabled issue with a workspace checkout, rebase its open PR
     /// onto the latest origin/main and republish the build when that succeeds.
+    /// Once that PR is merged, the same pass moves the checkout to main and
+    /// publishes a build from there.
     async fn rebase_open_prs(&self, issues: &[Issue]) {
         let rebaser = AutoRebaser::new(&self.config.auto_rebase, &self.workspace);
         let mut rebased = 0;
+        let mut merged = 0;
         let mut conflicted = 0;
         let mut failed = 0;
 
@@ -274,6 +277,7 @@ impl Orchestrator {
             let github = self.github.for_repo(owner, repo.clone());
             match rebaser.process_issue(&github, &repo, issue.number).await {
                 Ok(RebaseOutcome::Rebased) => rebased += 1,
+                Ok(RebaseOutcome::Merged) => merged += 1,
                 Ok(RebaseOutcome::Conflict) => conflicted += 1,
                 Ok(RebaseOutcome::Skipped) | Ok(RebaseOutcome::AlreadyCurrent) => {}
                 Err(e) => {
@@ -284,11 +288,12 @@ impl Orchestrator {
         }
 
         // Stay silent on a pass where every PR was already current.
-        if rebased + conflicted + failed > 0 {
+        if rebased + merged + conflicted + failed > 0 {
             println!(
-                "{} Pass complete: {} rebased, {} conflicted, {} errored.",
+                "{} Pass complete: {} rebased, {} merged, {} conflicted, {} errored.",
                 "REBASE:".magenta().bold(),
                 rebased,
+                merged,
                 conflicted,
                 failed
             );
@@ -702,6 +707,21 @@ impl Orchestrator {
                             let pr_url = String::from_utf8(output.stdout)?.trim().to_string();
                             let action = if is_empty { "created" } else { "updated" };
                             final_response = format!("{}\n\nPull Request {}: {}", final_response, action, pr_url);
+
+                            // A PR is only reviewable with a build to try, and the
+                            // auto-rebaser will not publish this head: it is already
+                            // on top of origin/main, so no rebase will ever move it.
+                            if self.config.auto_rebase.enabled {
+                                publish_and_report(
+                                    &github,
+                                    issue.number,
+                                    &issue_dir,
+                                    &repo_dir,
+                                    &branch_name,
+                                    &self.config.auto_rebase.publish_script,
+                                )
+                                .await;
+                            }
                         } else {
                             // If PR already exists, try to update it? For now, just report error.
                             return Err(anyhow!("Failed to manage PR: {}", String::from_utf8_lossy(&output.stderr)));

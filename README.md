@@ -24,7 +24,7 @@ The Orchestrator Loop for AI automates software development tasks by:
   - `ai-pr-creation`: Automated Pull Request creation.
   - `ai-done`: Completion state.
 - **Concurrency Safety:** Uses both GitHub labels (`ai-processing`) and local file locking to ensure only one instance processes an issue at a time.
-- **Auto-Rebase & Publish:** When `origin/main` moves, open PRs for `ai-enabled` issues are rebased in their workspace and a fresh build is published.
+- **Auto-Rebase & Publish:** Every open PR for an `ai-enabled` issue gets a dev build for its current head — published when the PR is created, and again whenever `origin/main` moves and the branch is rebased in its workspace. Once the PR is merged, the workspace switches to `main` and publishes a `*-main.apk` so it is obvious which build to install.
 - **Human-in-the-loop:** Easily pause for human help by adding an `ai-human-help` label.
 - **Configurable Agents:** Map different SDLC states to different AI agents (defaulting to `agy`).
 - **Flexible Prompt Delivery:** Supports both stdin-based agents (e.g., `gemini`) and CLI-argument-based agents (e.g., `agy`) via the `{prompt}` placeholder.
@@ -234,7 +234,7 @@ Deny the rest — `sudo`, force-pushes to `main`, repository deletion, and reads
 
 **Claude.** Permissions come from a settings file, and behavior from an agent definition:
 
-1. `~/.claude/agents/sdlc-dev.md` — the agent's operating instructions: never stop to ask for approval, `cd` into the repository subdirectory, verify by actually building and testing, and emit the state's completion keyword exactly so the state machine can advance.
+1. `~/.claude/agents/sdlc-dev.md` — the agent's operating instructions: never stop to ask for approval, `cd` into the repository subdirectory, verify by actually building and testing, and emit the state's completion keyword exactly so the state machine can advance. It also pins the test command: run only the project's fastest full-signal task — for Kotlin Compose Multiplatform repos that is `./gradlew desktopTest`, never the whole `test`/`check`/`allTests` matrix — and add another platform's test task only when the change is specific to that platform.
 2. `~/ai-workspaces/sdlc-agent-settings.json` — the permission grants:
 
 ```json
@@ -320,18 +320,29 @@ any repository that has an open, `ai-enabled` issue assigned to you. When it has
 each such issue's PR branch is rebased **inside that issue's own checkout** at
 `~/ai-workspaces/<repo>-<issue>/<repo>`:
 
-1. `git fetch origin` and compare `origin/main` against the sha last handled for
-   that issue (recorded in `~/ai-workspaces/<repo>-<issue>/.rebase_state.json`).
-2. Skip the issue unless it has an **open PR** for its `issue-<number>` branch.
+1. `git fetch origin`, then skip the issue unless it has an **open PR** for its
+   `issue-<number>` branch.
+2. Compare `origin/main` against the sha last handled for that issue (recorded in
+   `~/ai-workspaces/<repo>-<issue>/.rebase_state.json`). If it has not moved,
+   there is nothing to rebase — but the publish check in step 4 still runs.
 3. Rebase `issue-<number>` onto `origin/main`.
    - **On conflict:** the rebase is aborted, the branch is left exactly as it was,
      and a comment is posted on the issue asking for a manual rebase. The same
      conflict is not retried until `origin/main` moves again.
    - **On success:** the branch is force-pushed (`--force-with-lease`), which
      updates the PR.
-4. After a successful rebase that actually changed the branch, the repo's
-   `publish-android-dev.sh` is run from the repo root, building the new `.apk`
-   and copying it to Google Drive. Repos without that script simply skip this step.
+4. Publish a build for the branch head, unless that exact head already has one.
+   The repo's `publish-android-dev.sh` is run from the repo root, building the new
+   `.apk` and copying it to Google Drive; the head is then recorded as published in
+   `.rebase_state.json`. Repos without that script simply skip this step, and a
+   failed build leaves the head unpublished so the next pass retries it.
+
+Publishing keys off the **branch head**, not off the rebase, so every head gets
+exactly one build. That matters most at the end of the SDLC: `ai-pr-creation`
+rebases onto `origin/main` before it pushes, so a freshly opened PR is already
+current and no rebase will ever move it. The same publish step therefore runs
+right after the PR is created or updated, and a PR is never left without a build
+a reviewer can install.
 
 When a rebase happens, the console shows it end to end:
 
@@ -340,13 +351,43 @@ REBASE: origin/main moved to 07d4f07 - PR #99 (issue-7) needs a rebase
   PR: https://github.com/owner/demo/pull/99
   INFO: Rebasing issue-7 onto origin/main...
   OK: Rebased 1 commit(s) onto 07d4f07 and force-pushed - PR #99 is up to date (380441b -> da9481f)
-  INFO: Running publish-android-dev.sh to publish a new build...
+  INFO: Running publish-android-dev.sh to publish a build for issue-7 (da9481f)...
   OK: Published a new build for issue-7
-REBASE: Pass complete: 1 rebased, 0 conflicted, 0 errored.
+REBASE: Pass complete: 1 rebased, 0 merged, 0 conflicted, 0 errored.
 ```
 
 A conflict reports itself just as loudly, and a pass where every PR is already
 current stays silent.
+
+### After the PR is merged
+
+Step 1 finding no open PR is not always the end: if `gh` reports a **merged** PR
+for `issue-<number>`, that issue's work now lives in `main`, and the build worth
+installing is main's. So the workspace is switched over:
+
+1. Abort any half-finished rebase or merge, and skip the issue while the working
+   tree is dirty.
+2. `git checkout -B main origin/main`, which parks the checkout on the freshly
+   merged `main`. A local `main` holding commits the origin does not have is left
+   alone instead of being reset.
+3. Run the publish script from there, producing a `*-main.apk` rather than a
+   branch build.
+
+The merged PR number is recorded in `.rebase_state.json`, so this happens **once
+per merge**, not on every pass. The orchestrator only polls *open* issues, so the
+issue must still be open and `ai-enabled` when the PR merges; PR bodies therefore
+link the issue (`Related issue: ...`) instead of using a `Closes #<n>` keyword that
+would close it on merge and take the workspace out of the poll before the main
+build ran.
+
+```
+REBASE: PR #99 (issue-7) was merged - moving the checkout to main (07d4f07) for a fresh build
+  PR: https://github.com/owner/demo/pull/99
+  OK: Checked out main at 07d4f07
+  INFO: Running publish-android-dev.sh to publish a build for main (07d4f07)...
+  OK: Published a new build for main
+REBASE: Pass complete: 0 rebased, 1 merged, 0 conflicted, 0 errored.
+```
 
 Safety guards: issues currently being processed (holding the workspace lock or
 carrying the `ai-processing` label) are left alone, workspaces with uncommitted
@@ -359,7 +400,7 @@ Configure it in `sdlc_config.yaml`:
 auto_rebase:
   enabled: true                          # set false to turn the feature off
   main_branch: main                      # base branch to track
-  publish_script: publish-android-dev.sh # run from the repo root after a rebase
+  publish_script: publish-android-dev.sh # run from the repo root, once per branch head
   check_interval_secs: 300               # how often to fetch and compare
 ```
 

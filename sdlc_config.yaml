@@ -36,6 +36,11 @@ states:
       Implement the design:
       • Write failing tests first
       • Implement code to pass tests
+      • Verify with the project's fastest full-signal test command. For Kotlin
+        Compose Multiplatform repos that is `./gradlew desktopTest` and nothing
+        else — do not run `test`, `check`, `build`, `allTests`, or any
+        Android/iOS/web test task unless the change itself is specific to that
+        platform, in which case also run that platform's test task and say so.
       Output a brief summary (300-800 characters) with bullet points:
       • What you built
       • Key implementation notes
@@ -49,6 +54,9 @@ states:
     label: ai-review
     prompt: |
       Review the code against requirements and design (500-1500 characters maximum).
+      Re-run only the project's fastest full-signal test command (for Kotlin
+      Compose Multiplatform repos: `./gradlew desktopTest`); add another
+      platform's test task only if the change is specific to that platform.
       Format as bullet points:
       • Pass/fail verdict
       • 1-2 critical issues (if any)

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{anyhow, Result};
@@ -23,12 +23,24 @@ pub enum RebaseOutcome {
     Rebased,
     /// The rebase hit conflicts and was aborted; the PR needs a human.
     Conflict,
+    /// The PR was merged, so the checkout was moved to `origin/<main>` and a
+    /// build of main was published.
+    Merged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebaseState {
     pub last_main_sha: String,
     pub outcome: RebaseOutcome,
+    /// Branch head whose build was last published. Publishing keys off the branch
+    /// head rather than off `last_main_sha` so a PR gets exactly one build per
+    /// head, no matter which code path produced it.
+    #[serde(default)]
+    pub last_published_sha: Option<String>,
+    /// PR whose merge this workspace has already reacted to, so the checkout is
+    /// switched to main and a main build published exactly once per merge.
+    #[serde(default)]
+    pub merged_pr: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +76,11 @@ pub fn write_rebase_state(issue_dir: &Path, state: &RebaseState) -> Result<()> {
 /// rebase is retried only once main actually moves again.
 pub fn is_new_main_sha(state: Option<&RebaseState>, main_sha: &str) -> bool {
     state.map(|s| s.last_main_sha != main_sha).unwrap_or(true)
+}
+
+/// True until this workspace has reacted to `pr_number` being merged.
+pub fn is_new_merged_pr(state: Option<&RebaseState>, pr_number: u64) -> bool {
+    state.map(|s| s.merged_pr != Some(pr_number)).unwrap_or(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +226,29 @@ pub fn force_push(repo_dir: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parks the checkout on `main_branch` at exactly `origin/<main_branch>`, creating
+/// the local branch if the clone never had one. Refuses when the local branch
+/// carries commits the remote does not, because resetting would throw them away.
+pub fn switch_to_main(repo_dir: &Path, main_branch: &str) -> Result<()> {
+    if branch_exists_locally(repo_dir, main_branch)? {
+        match branch_sync_status(repo_dir, main_branch)? {
+            BranchSync::LocalAhead | BranchSync::Diverged => {
+                return Err(anyhow!(
+                    "local {} has commits origin/{} does not; not resetting it",
+                    main_branch,
+                    main_branch
+                ));
+            }
+            BranchSync::NoRemote | BranchSync::InSync | BranchSync::LocalBehind => {}
+        }
+    }
+    git_checked(
+        repo_dir,
+        &["checkout", "-B", main_branch, &format!("origin/{}", main_branch)],
+    )?;
+    Ok(())
+}
+
 /// Runs the repo's publish script. Returns false when the repo has no such script.
 pub fn run_publish_script(repo_dir: &Path, script: &str) -> Result<bool> {
     let script_path = repo_dir.join(script);
@@ -227,8 +267,129 @@ pub fn run_publish_script(repo_dir: &Path, script: &str) -> Result<bool> {
     Ok(true)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// The script ran and the branch head was recorded as published.
+    Published,
+    /// This exact branch head already has a build.
+    AlreadyPublished,
+    /// The repo has no publish script.
+    NoScript,
+    /// The checkout is parked on some other branch, so the build would be wrong.
+    NotOnBranch,
+    /// The script ran and failed; already reported.
+    Failed,
+}
+
+/// Publishes a build for `branch`'s current head unless that head was already
+/// published. This is what makes "an open PR always has a matching dev build"
+/// true whether the head came from a rebase or from the SDLC creating the PR.
+pub fn publish_if_needed(
+    issue_dir: &Path,
+    repo_dir: &Path,
+    branch: &str,
+    script: &str,
+) -> Result<PublishOutcome> {
+    let head = rev_parse(repo_dir, &format!("refs/heads/{}", branch))?;
+    let state = read_rebase_state(issue_dir);
+    if state.as_ref().and_then(|s| s.last_published_sha.as_deref()) == Some(head.as_str()) {
+        return Ok(PublishOutcome::AlreadyPublished);
+    }
+
+    if !repo_dir.join(script).is_file() {
+        return Ok(PublishOutcome::NoScript);
+    }
+
+    // The script builds whatever is checked out, so refuse to publish from a
+    // checkout that is not sitting on the branch we mean to ship.
+    if git_checked(repo_dir, &["rev-parse", "--abbrev-ref", "HEAD"])? != branch {
+        return Ok(PublishOutcome::NotOnBranch);
+    }
+
+    println!(
+        "  {} Running {} to publish a build for {} ({})...",
+        "INFO:".blue(),
+        script,
+        branch,
+        short_sha(&head)
+    );
+    run_publish_script(repo_dir, script)?;
+    record_published(issue_dir, &head)?;
+    Ok(PublishOutcome::Published)
+}
+
+/// `publish_if_needed` plus the reporting: a console line, and an issue comment
+/// when the build fails. Quiet when there is nothing to do, because this runs on
+/// every auto-rebase pass.
+pub async fn publish_and_report(
+    github: &GithubClient,
+    issue_number: u64,
+    issue_dir: &Path,
+    repo_dir: &Path,
+    branch: &str,
+    script: &str,
+) -> PublishOutcome {
+    match publish_if_needed(issue_dir, repo_dir, branch, script) {
+        Ok(PublishOutcome::Published) => {
+            println!("  {} Published a new build for {}", "OK:".green().bold(), branch);
+            PublishOutcome::Published
+        }
+        Ok(PublishOutcome::NotOnBranch) => {
+            println!(
+                "  {} {:?} is not checked out on {}; skipping publish.",
+                "WARN:".yellow(),
+                repo_dir,
+                branch
+            );
+            PublishOutcome::NotOnBranch
+        }
+        Ok(quiet) => quiet,
+        Err(e) => {
+            eprintln!("  {} {} failed for {}: {}", "FAILED:".red().bold(), script, branch, e);
+            if let Err(comment_err) = github
+                .post_comment(
+                    issue_number,
+                    &format!("⚠️ `{}` failed for `{}`, so the dev build was not refreshed: {}", script, branch, e),
+                )
+                .await
+            {
+                eprintln!("  {} Could not comment on the publish failure: {}", "WARN:".yellow(), comment_err);
+            }
+            PublishOutcome::Failed
+        }
+    }
+}
+
+fn record_published(issue_dir: &Path, head: &str) -> Result<()> {
+    let mut state = read_rebase_state(issue_dir).unwrap_or(RebaseState {
+        last_main_sha: String::new(),
+        outcome: RebaseOutcome::Skipped,
+        last_published_sha: None,
+        merged_pr: None,
+    });
+    state.last_published_sha = Some(head.to_string());
+    write_rebase_state(issue_dir, &state)
+}
+
+/// Remembers that `pr_number`'s merge has been handled, so the main build is
+/// published once per merge rather than on every pass.
+fn record_merged(issue_dir: &Path, main_sha: &str, pr_number: u64) -> Result<()> {
+    let last_published_sha = read_rebase_state(issue_dir).and_then(|s| s.last_published_sha);
+    write_rebase_state(
+        issue_dir,
+        &RebaseState {
+            last_main_sha: main_sha.to_string(),
+            outcome: RebaseOutcome::Merged,
+            last_published_sha,
+            merged_pr: Some(pr_number),
+        },
+    )
+}
+
 /// Watches `origin/<main>` for each issue workspace and keeps that issue's PR
 /// branch rebased on top of it, republishing the build when the rebase lands.
+/// Once the PR is merged it switches that checkout over to `main` and publishes
+/// a build from there instead.
 pub struct AutoRebaser<'a> {
     config: &'a AutoRebaseConfig,
     workspace: &'a Workspace,
@@ -262,14 +423,21 @@ impl<'a> AutoRebaser<'a> {
         let main_ref = format!("origin/{}", self.config.main_branch);
         let main_sha = rev_parse(&repo_dir, &main_ref)?;
 
+        let Some(pr) = self.open_pr(&repo_dir, &branch)? else {
+            // No open PR: either there never was one, or it just got merged and
+            // the interesting build is main's rather than the branch's.
+            return self
+                .publish_main_after_merge(github, issue_number, &issue_dir, &repo_dir, &branch)
+                .await;
+        };
+
         let state = read_rebase_state(&issue_dir);
         if !is_new_main_sha(state.as_ref(), &main_sha) {
+            // main has not moved, but this head may still be missing a build: the
+            // SDLC may have just pushed the PR, or an earlier publish may have failed.
+            self.publish(github, issue_number, &issue_dir, &repo_dir, &branch).await;
             return Ok(RebaseOutcome::Skipped);
         }
-
-        let Some(pr) = self.open_pr(&repo_dir, &branch)? else {
-            return Ok(RebaseOutcome::Skipped);
-        };
 
         println!(
             "{} {} moved to {} - PR #{} ({}) needs a rebase",
@@ -341,7 +509,8 @@ impl<'a> AutoRebaser<'a> {
 
         if result.head_after == result.head_before {
             self.record(&issue_dir, &main_sha, RebaseOutcome::AlreadyCurrent)?;
-            println!("  {} {} already contained {}; nothing to publish.", "OK:".green(), branch, main_ref);
+            println!("  {} {} already contained {}; no rebase needed.", "OK:".green(), branch, main_ref);
+            self.publish(github, issue_number, &issue_dir, &repo_dir, &branch).await;
             return Ok(RebaseOutcome::AlreadyCurrent);
         }
 
@@ -359,51 +528,117 @@ impl<'a> AutoRebaser<'a> {
             short_sha(&result.head_after)
         );
 
-        let repo_dir_for_publish = repo_dir.clone();
-        let script = self.config.publish_script.clone();
-        if repo_dir.join(&script).is_file() {
-            println!("  {} Running {} to publish a new build...", "INFO:".blue(), script);
-        }
-        match run_publish_script(&repo_dir_for_publish, &script) {
-            Ok(true) => println!("  {} Published a new build for {}", "OK:".green().bold(), branch),
-            Ok(false) => println!(
-                "  {} No {} in {}; skipping publish.",
-                "INFO:".blue(),
-                script,
-                repo
-            ),
-            Err(e) => {
-                eprintln!("  {} Publish failed after rebase: {}", "FAILED:".red().bold(), e);
-                github
-                    .post_comment(
-                        issue_number,
-                        &format!(
-                            "✅ `{}` was rebased onto `{}` (`{}`), but `{}` failed: {}",
-                            branch,
-                            main_ref,
-                            short_sha(&main_sha),
-                            script,
-                            e
-                        ),
-                    )
-                    .await?;
-            }
-        }
+        self.publish(github, issue_number, &issue_dir, &repo_dir, &branch).await;
 
         Ok(RebaseOutcome::Rebased)
     }
 
+    /// A merged PR means this issue's work now lives in `main`, so the build a
+    /// human should install is main's. The checkout is moved onto the latest
+    /// `origin/<main>` and published once per merged PR, producing the
+    /// `*-main.apk` that supersedes the branch's dev build.
+    async fn publish_main_after_merge(
+        &self,
+        github: &GithubClient,
+        issue_number: u64,
+        issue_dir: &Path,
+        repo_dir: &Path,
+        branch: &str,
+    ) -> Result<RebaseOutcome> {
+        let Some(pr) = self.merged_pr(repo_dir, branch)? else {
+            return Ok(RebaseOutcome::Skipped);
+        };
+
+        let state = read_rebase_state(issue_dir);
+        if !is_new_merged_pr(state.as_ref(), pr.number) {
+            return Ok(RebaseOutcome::Skipped);
+        }
+
+        let main = &self.config.main_branch;
+        let main_sha = rev_parse(repo_dir, &format!("origin/{}", main))?;
+        println!(
+            "{} PR #{} ({}) was merged - moving the checkout to {} ({}) for a fresh build",
+            tag(),
+            pr.number,
+            branch,
+            main,
+            short_sha(&main_sha).yellow()
+        );
+        if !pr.url.is_empty() {
+            println!("  {} {}", "PR:".blue(), pr.url);
+        }
+
+        abort_in_progress_operations(repo_dir)?;
+        if !working_tree_clean(repo_dir)? {
+            println!(
+                "  {} Uncommitted changes in {:?}; leaving the checkout on {}.",
+                "WARN:".yellow(),
+                repo_dir,
+                branch
+            );
+            return Ok(RebaseOutcome::Skipped);
+        }
+
+        if let Err(e) = switch_to_main(repo_dir, main) {
+            println!("  {} {}", "WARN:".yellow(), e);
+            return Ok(RebaseOutcome::Skipped);
+        }
+        println!("  {} Checked out {} at {}", "OK:".green(), main, short_sha(&main_sha));
+
+        // Left unrecorded on a failed build so the next pass retries it.
+        if self.publish(github, issue_number, issue_dir, repo_dir, main).await == PublishOutcome::Failed {
+            return Ok(RebaseOutcome::Skipped);
+        }
+        record_merged(issue_dir, &main_sha, pr.number)?;
+        Ok(RebaseOutcome::Merged)
+    }
+
+    async fn publish(
+        &self,
+        github: &GithubClient,
+        issue_number: u64,
+        issue_dir: &Path,
+        repo_dir: &Path,
+        branch: &str,
+    ) -> PublishOutcome {
+        publish_and_report(
+            github,
+            issue_number,
+            issue_dir,
+            repo_dir,
+            branch,
+            &self.config.publish_script,
+        )
+        .await
+    }
+
+    /// Records the handled main sha, preserving whatever head was last published.
     fn record(&self, issue_dir: &Path, main_sha: &str, outcome: RebaseOutcome) -> Result<()> {
+        let previous = read_rebase_state(issue_dir);
         write_rebase_state(
             issue_dir,
-            &RebaseState { last_main_sha: main_sha.to_string(), outcome },
+            &RebaseState {
+                last_main_sha: main_sha.to_string(),
+                outcome,
+                last_published_sha: previous.as_ref().and_then(|s| s.last_published_sha.clone()),
+                merged_pr: previous.and_then(|s| s.merged_pr),
+            },
         )
     }
 
-    fn open_pr(&self, repo_dir: &PathBuf, branch: &str) -> Result<Option<OpenPr>> {
+    fn open_pr(&self, repo_dir: &Path, branch: &str) -> Result<Option<OpenPr>> {
+        self.pr_for_branch(repo_dir, branch, "open")
+    }
+
+    /// The most recent merged PR for `branch`; `gh` lists newest first.
+    fn merged_pr(&self, repo_dir: &Path, branch: &str) -> Result<Option<OpenPr>> {
+        self.pr_for_branch(repo_dir, branch, "merged")
+    }
+
+    fn pr_for_branch(&self, repo_dir: &Path, branch: &str, state: &str) -> Result<Option<OpenPr>> {
         let output = Command::new("gh")
             .current_dir(repo_dir)
-            .args(["pr", "list", "--head", branch, "--state", "open", "--json", "number,url"])
+            .args(["pr", "list", "--head", branch, "--state", state, "--json", "number,url"])
             .output()
             .map_err(|e| anyhow!("Failed to run `gh pr list`: {}", e))?;
 
