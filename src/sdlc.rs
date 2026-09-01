@@ -9,6 +9,7 @@ use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
 use std::fs;
+use std::io::Write;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,14 +25,36 @@ pub struct Orchestrator {
 }
 
 
-async fn wait_with_feedback(duration: std::time::Duration) -> Result<bool> {
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            println!("\n{} Shutdown signal received during sleep. Exiting.", "INFO:".blue());
-            return Ok(true); // Signaled exit
+/// Waits for `duration`, redrawing a one-line countdown in place each second.
+/// Returns Ok(true) when a shutdown signal interrupted the wait.
+async fn wait_with_countdown(duration: std::time::Duration, started_at: &str) -> Result<bool> {
+    let deadline = std::time::Instant::now() + duration;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
         }
-        _ = tokio::time::sleep(duration) => {}
+
+        // Round up so the countdown shows the full duration on the first draw
+        // and only reaches 00s once the wait is actually over.
+        let secs = remaining.as_secs() + if remaining.subsec_nanos() > 0 { 1 } else { 0 };
+        print!("\r\x1b[2K{} Checking for issues in {:02}s. Started waiting at {}.", "INFO:".blue(), secs, started_at);
+        let _ = std::io::stdout().flush();
+
+        let tick = std::cmp::min(remaining, std::time::Duration::from_secs(1));
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n{} Shutdown signal received during sleep. Exiting.", "INFO:".blue());
+                return Ok(true); // Signaled exit
+            }
+            _ = tokio::time::sleep(tick) => {}
+        }
     }
+
+    // Leave the line clean for whatever prints next.
+    print!("\r\x1b[2K");
+    let _ = std::io::stdout().flush();
 
     Ok(false) // No signal
 }
@@ -55,10 +78,8 @@ impl Orchestrator {
 
     pub async fn run(&mut self, run_once: bool) -> Result<()> {
         println!("{}", "Starting Orchestrator Loop...".green().bold());
-        let start_time = Local::now().format("%H:%M:%S").to_string();
-        println!("{} Checking for issues every 15s. Started waiting at {}.", "INFO:".blue(), start_time);
-
-        let mut just_finished_work = false;
+        // Tracks when the current stretch of waiting began; None while work is in flight.
+        let mut wait_started_at = Some(Local::now().format("%H:%M:%S").to_string());
 
         loop {
             let res: Pin<Box<dyn Future<Output = Result<Vec<Issue>>>>> = if self.all_repos {
@@ -142,7 +163,7 @@ impl Orchestrator {
                     }
 
                     work_done = true;
-                    just_finished_work = true;
+                    wait_started_at = None;
                     // Handle only one issue at a time
                 }
             }
@@ -152,12 +173,10 @@ impl Orchestrator {
             }
 
             if !work_done {
-                if just_finished_work {
-                    let wait_time = Local::now().format("%H:%M:%S").to_string();
-                    println!("{} Checking for issues every 15s. Started waiting at {}.", "INFO:".blue(), wait_time);
-                    just_finished_work = false;
-                }
-                if wait_with_feedback(std::time::Duration::from_secs(15)).await? {
+                let started_at = wait_started_at
+                    .get_or_insert_with(|| Local::now().format("%H:%M:%S").to_string())
+                    .clone();
+                if wait_with_countdown(std::time::Duration::from_secs(15), &started_at).await? {
                     break;
                 }
             }
