@@ -28,6 +28,7 @@ The Orchestrator Loop for AI automates software development tasks by:
 - **Human-in-the-loop:** Easily pause for human help by adding an `ai-human-help` label.
 - **Configurable Agents:** Map different SDLC states to different AI agents (defaulting to `agy`).
 - **Flexible Prompt Delivery:** Supports both stdin-based agents (e.g., `gemini`) and CLI-argument-based agents (e.g., `agy`) via the `{prompt}` placeholder.
+- **Live Agent Transcript:** Shows the agent's tool calls, their results, and its prose as they happen, instead of one silent wait followed by a wall of text.
 - **Cross-platform:** Works on Windows, Mac, and Linux.
 
 ## System Architecture
@@ -111,6 +112,9 @@ agents:
 state_agents: {}
 ```
 
+Optional keys `stream_json` and `partial_messages` control the live transcript;
+see [Watching the agent work](#watching-the-agent-work).
+
 #### Using a different agent
 
 The `command_template` controls how the agent is invoked. The special `{prompt}` token is replaced with the full prompt at runtime as a single argument.
@@ -139,6 +143,52 @@ agents:
 state_agents:
   ai-review: gemini
 ```
+
+#### Watching the agent work
+
+Headless agents normally print nothing until they exit, which makes a long
+`ai-development` step indistinguishable from a hung one. For Claude, the
+orchestrator asks for streaming output and renders it as the run happens:
+
+```
+* agent session started (claude-opus-5, cwd /Users/you/ai-workspaces/myrepo-42)
+> Read(src/parser.rs)
+  <- pub fn parse(input: &str) -> Result<Ast> {
+     ... 118 more lines
+> Edit(src/parser.rs)
+  <- The file src/parser.rs has been updated.
+> Bash(cargo test)
+  <- test result: ok. 41 passed; 0 failed
+Added the trailing-comma case and its test.
+COMPLETED_DEVELOPMENT
+* agent run finished (94.2s, 12 turns, $0.4130)
+```
+
+This is on by default. When `command_template` invokes `claude` in print mode,
+the orchestrator inserts `--output-format stream-json --verbose` right after the
+binary, so a template like
+
+```yaml
+command_template: claude --print --agent {agent} {prompt}
+```
+
+actually runs as `claude --output-format stream-json --verbose --print --agent
+sdlc-dev <prompt>`. Two optional settings adjust it:
+
+```yaml
+stream_json: true        # default; set to false to keep the agent's raw output
+partial_messages: false  # set to true to stream prose token by token
+```
+
+The flags are only added for `claude ... --print` templates that do not already
+set `--output-format`. Other agents are launched exactly as written, and their
+plain-text output still streams through line by line.
+
+The same text — without the terminal colors — is what lands in the audit log at
+`~/ai-workspaces/audit/<repo>/<issue>/<state>_<timestamp>.log`. Only the agent's
+prose is scanned for the state's completion keyword, so a keyword that happens
+to appear inside a tool call or a file being edited will not advance the state
+machine.
 
 #### Agent permissions
 

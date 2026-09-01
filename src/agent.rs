@@ -7,6 +7,8 @@ use anyhow::{Result, anyhow};
 use std::io::{self, Write};
 use colored::Colorize;
 
+use crate::agent_stream::StreamRenderer;
+
 pub struct Agent {
     pub command_line: String,
 }
@@ -88,9 +90,9 @@ impl Agent {
         }
 
         let mut stdout_reader = BufReader::new(stdout);
-        let mut full_output = Vec::new();
+        let mut renderer = StreamRenderer::new();
 
-        let read_task = self.read_stdout(&mut stdout_reader, &mut audit_file, &mut full_output);
+        let read_task = self.read_stdout(&mut stdout_reader, &mut audit_file, &mut renderer);
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -106,38 +108,68 @@ impl Agent {
             }
         }
 
-        println!("{} Received response:\n{}", "DEBUG:".cyan(), String::from_utf8_lossy(&full_output));
-
-        Ok(String::from_utf8_lossy(&full_output).to_string())
+        Ok(renderer.into_transcript())
     }
 
+    /// Streams the agent's stdout line by line so the run is visible as it
+    /// happens, rendering Claude's `stream-json` events into readable console
+    /// output and leaving other agents' plain text alone.
+    ///
+    /// The audit log gets the same text without ANSI styling.
     async fn read_stdout<R, L>(
-        &self, 
-        stdout: &mut R, 
-        audit_file: &mut L, 
-        full_output: &mut Vec<u8>
-    ) -> Result<()> 
-    where 
+        &self,
+        stdout: &mut R,
+        audit_file: &mut L,
+        renderer: &mut StreamRenderer,
+    ) -> Result<()>
+    where
         R: AsyncReadExt + Unpin,
         L: AsyncWriteExt + Unpin,
     {
-        let mut out_buf = [0u8; 1024];
+        let mut out_buf = [0u8; 4096];
+        let mut pending: Vec<u8> = Vec::new();
 
         loop {
             let n = stdout.read(&mut out_buf).await?;
             if n == 0 { break; } // EOF from agent
-            
-            let data = &out_buf[..n];
-            // Write to terminal (stdout)
-            io::stdout().write_all(data)?;
+            pending.extend_from_slice(&out_buf[..n]);
+
+            while let Some(newline) = pending.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = pending.drain(..=newline).collect();
+                let line = String::from_utf8_lossy(&line[..newline]);
+                Self::emit_line(line.trim_end_matches('\r'), audit_file, renderer).await?;
+            }
+        }
+
+        // Trailing output with no final newline.
+        if !pending.is_empty() {
+            let line = String::from_utf8_lossy(&pending).to_string();
+            Self::emit_line(line.trim_end_matches('\r'), audit_file, renderer).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn emit_line<L>(
+        line: &str,
+        audit_file: &mut L,
+        renderer: &mut StreamRenderer,
+    ) -> Result<()>
+    where
+        L: AsyncWriteExt + Unpin,
+    {
+        for event in renderer.render_line(line) {
+            io::stdout().write_all(event.colored().as_bytes())?;
+            io::stdout().write_all(b"\n")?;
             io::stdout().flush()?;
-            
-            // Write to audit log
-            audit_file.write_all(data).await?;
-            
-            // Keep track of full output
-            full_output.extend_from_slice(data);
+
+            audit_file.write_all(event.text.as_bytes()).await?;
+            audit_file.write_all(b"\n").await?;
         }
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "agent_tests.rs"]
+mod agent_tests;

@@ -4,31 +4,92 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_agent_config_default() {
+    fn config(command_template: &str, default_agent: &str) -> AgentConfig {
         let mut agents = HashMap::new();
-        agents.insert("default".to_string(), "gemini".to_string());
-        let config = AgentConfig {
-            command_template: "gemini -m {agent}".to_string(),
+        agents.insert("default".to_string(), default_agent.to_string());
+        AgentConfig {
+            command_template: command_template.to_string(),
             agents,
             state_agents: HashMap::new(),
-        };
+            stream_json: true,
+            partial_messages: false,
+        }
+    }
+
+    #[test]
+    fn test_agent_config_default() {
+        let config = config("gemini -m {agent}", "gemini");
         assert_eq!(config.get_command_for_state("any"), "gemini -m gemini");
     }
 
     #[test]
     fn test_agent_config_override() {
-        let mut agents = HashMap::new();
-        agents.insert("default".to_string(), "gemini".to_string());
-        let mut state_agents = HashMap::new();
-        state_agents.insert("ai-design".to_string(), "designer".to_string());
-        let config = AgentConfig {
-            command_template: "kiro --agent {agent}".to_string(),
-            agents,
-            state_agents,
-        };
+        let mut config = config("kiro --agent {agent}", "gemini");
+        config.state_agents.insert("ai-design".to_string(), "designer".to_string());
         assert_eq!(config.get_command_for_state("ai-design"), "kiro --agent designer");
         assert_eq!(config.get_command_for_state("ai-requirements"), "kiro --agent gemini");
+    }
+
+    #[test]
+    fn test_claude_print_gets_streaming_flags_before_the_prompt() {
+        let config = config("claude --print --agent {agent} {prompt}", "sdlc-dev");
+        assert_eq!(
+            config.get_command_for_state("ai-development"),
+            "claude --output-format stream-json --verbose --print --agent sdlc-dev {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_streaming_flags_include_partial_messages_when_requested() {
+        let mut config = config("claude --print {prompt}", "claude");
+        config.partial_messages = true;
+        assert_eq!(
+            config.get_command_for_state("any"),
+            "claude --output-format stream-json --verbose --include-partial-messages --print {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_streaming_flags_work_with_an_absolute_claude_path() {
+        let config = config("/usr/local/bin/claude -p {prompt}", "claude");
+        assert_eq!(
+            config.get_command_for_state("any"),
+            "/usr/local/bin/claude --output-format stream-json --verbose -p {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_streaming_flags_are_skipped_when_disabled() {
+        let mut config = config("claude --print {prompt}", "claude");
+        config.stream_json = false;
+        assert_eq!(config.get_command_for_state("any"), "claude --print {prompt}");
+    }
+
+    #[test]
+    fn test_an_explicit_output_format_is_left_alone() {
+        let config = config("claude --print --output-format json {prompt}", "claude");
+        assert_eq!(config.get_command_for_state("any"), "claude --print --output-format json {prompt}");
+    }
+
+    #[test]
+    fn test_non_claude_agents_are_left_alone() {
+        let config = config("gemini --print {prompt}", "gemini");
+        assert_eq!(config.get_command_for_state("any"), "gemini --print {prompt}");
+    }
+
+    #[test]
+    fn test_claude_without_print_is_left_alone() {
+        // stream-json only works in print mode, so an interactive template stays as-is.
+        let config = config("claude --agent {agent}", "sdlc-dev");
+        assert_eq!(config.get_command_for_state("any"), "claude --agent sdlc-dev");
+    }
+
+    #[test]
+    fn test_agent_config_defaults_to_streaming_when_the_field_is_absent() {
+        let yaml = "command_template: claude --print {prompt}\nagents:\n  default: claude\nstate_agents: {}\n";
+        let config: AgentConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.stream_json, "existing configs should stream without being edited");
+        assert!(!config.partial_messages);
     }
 
     #[test]

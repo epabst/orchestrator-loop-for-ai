@@ -58,6 +58,8 @@ impl Workspace {
                     .into_iter()
                     .collect(),
                 state_agents: HashMap::new(),
+                stream_json: default_stream_json(),
+                partial_messages: false,
             };
             let yaml = serde_yaml::to_string(&default_config)?;
             fs::write(&config_path, yaml)?;
@@ -93,11 +95,23 @@ impl Drop for IssueLock {
     }
 }
 
+fn default_stream_json() -> bool {
+    true
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AgentConfig {
     pub command_template: String,
     pub agents: std::collections::HashMap<String, String>,
     pub state_agents: std::collections::HashMap<String, String>,
+    /// Ask `claude --print` for `stream-json` output so the orchestrator can
+    /// show the conversation - tool calls, results and prose - while the agent
+    /// is still working instead of only after it exits.
+    #[serde(default = "default_stream_json")]
+    pub stream_json: bool,
+    /// Also stream partial assistant messages, so prose appears token by token.
+    #[serde(default)]
+    pub partial_messages: bool,
 }
 
 impl AgentConfig {
@@ -106,8 +120,35 @@ impl AgentConfig {
             .get(state)
             .cloned()
             .unwrap_or_else(|| self.agents.get("default").cloned().unwrap_or_else(|| "gemini".to_string()));
-        
-        self.command_template.replace("{agent}", &agent)
+
+        let command = self.command_template.replace("{agent}", &agent);
+        self.with_streaming_flags(command)
+    }
+
+    /// Adds Claude's streaming flags right after the binary, leaving the rest of
+    /// the template (including where `{prompt}` sits) alone.
+    ///
+    /// Only applies to `claude --print`: `--output-format` is a Claude flag, and
+    /// it only works in print mode. A template that already sets an output
+    /// format is left as the user wrote it.
+    fn with_streaming_flags(&self, command: String) -> String {
+        if !self.stream_json || command.contains("--output-format") {
+            return command;
+        }
+
+        let mut tokens = command.split_whitespace();
+        let Some(bin) = tokens.next() else { return command };
+        let is_claude = std::path::Path::new(bin).file_name().and_then(|n| n.to_str()) == Some("claude");
+        let rest: Vec<&str> = tokens.collect();
+        if !is_claude || !rest.iter().any(|t| *t == "--print" || *t == "-p") {
+            return command;
+        }
+
+        let mut flags = vec!["--output-format", "stream-json", "--verbose"];
+        if self.partial_messages {
+            flags.push("--include-partial-messages");
+        }
+        format!("{} {} {}", bin, flags.join(" "), rest.join(" "))
     }
 }
 
