@@ -292,4 +292,73 @@ merge_conflict_keyword: RESOLUTION_COMPLETE
         assert_eq!(config.pr_defined_keyword, "DONE_WITH_PR");
         assert_eq!(config.merge_conflict_keyword, "RESOLUTION_COMPLETE");
     }
+
+    #[test]
+    fn test_auto_rebase_defaults_when_absent() {
+        let yaml = r#"
+states:
+  - name: ai-test
+    label: ai-test
+    prompt: "test"
+    keywords:
+      DONE: ai-next
+failure_label: ai-human-help
+human_help_label: ai-human-help
+lock_label: ai-processing
+enabled_label: ai-enabled
+"#;
+        let config = SdlcConfig::from_yaml(yaml).unwrap();
+        assert!(config.auto_rebase.enabled);
+        assert_eq!(config.auto_rebase.main_branch, "main");
+        assert_eq!(config.auto_rebase.publish_script, "publish-android-dev.sh");
+        assert_eq!(config.auto_rebase.check_interval_secs, 300);
+    }
+
+    #[test]
+    fn test_auto_rebase_can_be_configured() {
+        let yaml = r#"
+states:
+  - name: ai-test
+    label: ai-test
+    prompt: "test"
+    keywords:
+      DONE: ai-next
+failure_label: ai-human-help
+human_help_label: ai-human-help
+lock_label: ai-processing
+enabled_label: ai-enabled
+auto_rebase:
+  enabled: false
+  main_branch: master
+  publish_script: publish-web.sh
+  check_interval_secs: 60
+"#;
+        let config = SdlcConfig::from_yaml(yaml).unwrap();
+        assert!(!config.auto_rebase.enabled);
+        assert_eq!(config.auto_rebase.main_branch, "master");
+        assert_eq!(config.auto_rebase.publish_script, "publish-web.sh");
+        assert_eq!(config.auto_rebase.check_interval_secs, 60);
+    }
+
+    #[test]
+    fn test_auto_rebase_partial_config_keeps_defaults() {
+        let yaml = r#"
+states:
+  - name: ai-test
+    label: ai-test
+    prompt: "test"
+    keywords:
+      DONE: ai-next
+failure_label: ai-human-help
+human_help_label: ai-human-help
+lock_label: ai-processing
+enabled_label: ai-enabled
+auto_rebase:
+  check_interval_secs: 900
+"#;
+        let config = SdlcConfig::from_yaml(yaml).unwrap();
+        assert!(config.auto_rebase.enabled);
+        assert_eq!(config.auto_rebase.main_branch, "main");
+        assert_eq!(config.auto_rebase.check_interval_secs, 900);
+    }
 }

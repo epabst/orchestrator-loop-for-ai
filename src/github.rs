@@ -10,6 +10,16 @@ pub struct GithubClient {
     pub repo: String,
 }
 
+/// Splits `https://api.github.com/repos/<owner>/<repo>` into its owner and repo.
+pub fn repo_slug(issue: &Issue) -> Result<(String, String)> {
+    let path = issue.repository_url.path();
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() < 4 {
+        return Err(anyhow::anyhow!("Unexpected repository URL: {}", issue.repository_url));
+    }
+    Ok((parts[2].to_string(), parts[3].to_string()))
+}
+
 impl GithubClient {
     pub fn new(token: String, owner: String, repo: String) -> Result<Self> {
         let client = Octocrab::builder()

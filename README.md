@@ -24,6 +24,7 @@ The Orchestrator Loop for AI automates software development tasks by:
   - `ai-pr-creation`: Automated Pull Request creation.
   - `ai-done`: Completion state.
 - **Concurrency Safety:** Uses both GitHub labels (`ai-processing`) and local file locking to ensure only one instance processes an issue at a time.
+- **Auto-Rebase & Publish:** When `origin/main` moves, open PRs for `ai-enabled` issues are rebased in their workspace and a fresh build is published.
 - **Human-in-the-loop:** Easily pause for human help by adding an `ai-human-help` label.
 - **Configurable Agents:** Map different SDLC states to different AI agents (defaulting to `agy`).
 - **Flexible Prompt Delivery:** Supports both stdin-based agents (e.g., `gemini`) and CLI-argument-based agents (e.g., `agy`) via the `{prompt}` placeholder.
@@ -169,6 +170,41 @@ The orchestrator will poll every 15 seconds for issues assigned to you with the 
 
 > [!NOTE]
 > When using all-repos mode, the GITHUB_TOKEN must have **Issues: Read and write** and **Metadata: Read-only** permissions on every repository you want the orchestrator to manage.
+
+## Auto-Rebase and Publish
+
+Between agent phases, the orchestrator checks whether `origin/main` has moved in
+any repository that has an open, `ai-enabled` issue assigned to you. When it has,
+each such issue's PR branch is rebased **inside that issue's own checkout** at
+`~/ai-workspaces/<repo>-<issue>/<repo>`:
+
+1. `git fetch origin` and compare `origin/main` against the sha last handled for
+   that issue (recorded in `~/ai-workspaces/<repo>-<issue>/.rebase_state.json`).
+2. Skip the issue unless it has an **open PR** for its `issue-<number>` branch.
+3. Rebase `issue-<number>` onto `origin/main`.
+   - **On conflict:** the rebase is aborted, the branch is left exactly as it was,
+     and a comment is posted on the issue asking for a manual rebase. The same
+     conflict is not retried until `origin/main` moves again.
+   - **On success:** the branch is force-pushed (`--force-with-lease`), which
+     updates the PR.
+4. After a successful rebase that actually changed the branch, the repo's
+   `publish-android-dev.sh` is run from the repo root, building the new `.apk`
+   and copying it to Google Drive. Repos without that script simply skip this step.
+
+Safety guards: issues currently being processed (holding the workspace lock or
+carrying the `ai-processing` label) are left alone, workspaces with uncommitted
+changes are skipped, and a branch that has diverged from its remote is skipped
+rather than force-pushed over.
+
+Configure it in `sdlc_config.yaml`:
+
+```yaml
+auto_rebase:
+  enabled: true                          # set false to turn the feature off
+  main_branch: main                      # base branch to track
+  publish_script: publish-android-dev.sh # run from the repo root after a rebase
+  check_interval_secs: 300               # how often to fetch and compare
+```
 
 ## Local Workspace
 

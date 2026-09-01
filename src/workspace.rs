@@ -30,19 +30,19 @@ impl Workspace {
         Ok(dir)
     }
 
-    pub fn acquire_lock(&self, repo_name: &str, issue_id: u64) -> Result<fs::File> {
+    pub fn acquire_lock(&self, repo_name: &str, issue_id: u64) -> Result<IssueLock> {
         let dir = self.get_issue_dir(repo_name, issue_id);
         let lock_file_path = dir.join(".lock");
         let file = fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .open(lock_file_path)?;
+            .open(&lock_file_path)?;
 
         // Try to lock the file. If it fails, another process has it.
         file.try_lock_exclusive()
             .map_err(|_| anyhow!("Could not acquire lock for issue {}", issue_id))?;
-        
-        Ok(file)
+
+        Ok(IssueLock { file: Some(file), path: lock_file_path })
     }
 
     pub fn read_config(&self) -> Result<AgentConfig> {
@@ -73,6 +73,23 @@ impl Workspace {
             fs::create_dir_all(&audit_dir)?;
         }
         Ok(audit_dir)
+    }
+}
+
+/// Holds an issue's exclusive lock and cleans the `.lock` file up on release.
+/// Dropping is what happens when the work finishes *and* when Ctrl+C unwinds or
+/// cancels an in-flight SDLC step, so no stale lock files are left behind.
+pub struct IssueLock {
+    file: Option<fs::File>,
+    path: PathBuf,
+}
+
+impl Drop for IssueLock {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = fs2::FileExt::unlock(&file);
+        }
+        let _ = fs::remove_file(&self.path);
     }
 }
 

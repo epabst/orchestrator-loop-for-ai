@@ -100,3 +100,14 @@ lock_label: ai-processing
 enabled_label: ai-enabled
 pr_defined_keyword: CHANGES_SUMMARIZED
 merge_conflict_keyword: MERGE_RESOLVED
+
+# Keeps open PRs current with origin/main. Whenever origin/main moves, each
+# ai-enabled issue's PR branch is rebased inside its ~/ai-workspaces checkout;
+# when the rebase lands cleanly the branch is force-pushed and publish_script
+# runs to build and publish a fresh dev build. Conflicts abort the rebase and
+# leave a comment on the issue instead.
+auto_rebase:
+  enabled: true
+  main_branch: main
+  publish_script: publish-android-dev.sh
+  check_interval_secs: 300

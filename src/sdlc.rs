@@ -4,6 +4,7 @@ use crate::workspace::{Workspace};
 use crate::agent::Agent;
 use crate::issue_context::IssueContextStore;
 use crate::signal_handler::OutputGenerator;
+use crate::rebase::{AutoRebaser, RebaseOutcome};
 use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
@@ -19,6 +20,7 @@ pub struct Orchestrator {
     pub all_repos: bool,
     pub context_store: Arc<IssueContextStore>,
     pub last_processed_issue: Option<(String, u64)>,
+    pub last_rebase_check: Option<std::time::Instant>,
 }
 
 
@@ -48,7 +50,7 @@ impl Orchestrator {
     pub fn new(config: SdlcConfig, github: GithubClient, workspace: Workspace) -> Self {
         let all_repos = github.repo.is_empty();
         let context_store = Arc::new(IssueContextStore::new());
-        Self { config, github, workspace, all_repos, context_store, last_processed_issue: None }
+        Self { config, github, workspace, all_repos, context_store, last_processed_issue: None, last_rebase_check: None }
     }
 
     pub async fn run(&mut self, run_once: bool) -> Result<()> {
@@ -77,20 +79,23 @@ impl Orchestrator {
                 res = res => res?,
             };
 
+            if self.should_check_rebases() {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\n{} Shutdown signal received. Exiting.", "INFO:".blue());
+                        break;
+                    }
+                    _ = self.rebase_open_prs(&issues) => {}
+                }
+                self.last_rebase_check = Some(std::time::Instant::now());
+            }
+
             let mut work_done = false;
 
             // Use sticky selection instead of direct iteration
             if let Some(issue) = self.select_next_issue(issues.clone()).await {
                 if self.should_process_issue(&issue).await? {
-                    let (owner, repo) = if self.all_repos {
-                        let url = &issue.repository_url;
-                        let path = url.path();
-                        if path.is_empty() { return Err(anyhow!("No repository URL")); }
-                        let parts: Vec<&str> = path.split('/').collect();
-                        (parts[2].to_string(), parts[3].to_string())
-                    } else {
-                        (self.github.owner.clone(), self.github.repo.clone())
-                    };
+                    let (owner, repo) = self.issue_repo(&issue)?;
 
                     let owner_str = owner.to_string();
                     let repo_str = repo.to_string();
@@ -181,6 +186,64 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Resolves the owner/repo an issue belongs to, honouring all-repos mode.
+    fn issue_repo(&self, issue: &Issue) -> Result<(String, String)> {
+        if !self.all_repos {
+            return Ok((self.github.owner.clone(), self.github.repo.clone()));
+        }
+        crate::github::repo_slug(issue)
+    }
+
+    fn should_check_rebases(&self) -> bool {
+        if !self.config.auto_rebase.enabled {
+            return false;
+        }
+        match self.last_rebase_check {
+            None => true,
+            Some(last) => {
+                last.elapsed() >= std::time::Duration::from_secs(self.config.auto_rebase.check_interval_secs)
+            }
+        }
+    }
+
+    /// For every ai-enabled issue with a workspace checkout, rebase its open PR
+    /// onto the latest origin/main and republish the build when that succeeds.
+    async fn rebase_open_prs(&self, issues: &[Issue]) {
+        let rebaser = AutoRebaser::new(&self.config.auto_rebase, &self.workspace);
+
+        for issue in issues {
+            let has_enabled = issue.labels.iter().any(|l| l.name == self.config.enabled_label);
+            let is_locked = issue.labels.iter().any(|l| l.name == self.config.lock_label);
+            if !has_enabled || is_locked {
+                continue;
+            }
+
+            let (owner, repo) = match self.issue_repo(issue) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("{} Skipping rebase for issue #{}: {}", "WARN:".yellow(), issue.number, e);
+                    continue;
+                }
+            };
+
+            // The same local lock the SDLC uses, so two instances never rebase at once.
+            let Ok(_lock) = self.workspace.acquire_lock(&repo, issue.number) else {
+                continue;
+            };
+
+            let github = self.github.for_repo(owner, repo.clone());
+            match rebaser.process_issue(&github, &repo, issue.number).await {
+                Ok(RebaseOutcome::Skipped) | Ok(RebaseOutcome::AlreadyCurrent) => {}
+                Ok(outcome) => {
+                    println!("  {} Issue #{}: {:?}", "REBASE:".yellow(), issue.number, outcome);
+                }
+                Err(e) => {
+                    eprintln!("{} Auto-rebase failed for issue #{}: {}", "WARN:".yellow(), issue.number, e);
+                }
+            }
+        }
+    }
+
     async fn should_process_issue(&self, issue: &Issue) -> Result<bool> {
         // Check if ai-enabled label is present
         let enabled_label = issue.labels.iter().find(|l| l.name == self.config.enabled_label);
@@ -188,15 +251,7 @@ impl Orchestrator {
             return Ok(false);
         }
 
-        let (owner, repo) = if self.all_repos {
-            let url = &issue.repository_url;
-            let path = url.path();
-            if path.is_empty() { return Err(anyhow!("No repository URL")); }
-            let parts: Vec<&str> = path.split('/').collect();
-            (parts[2].to_string(), parts[3].to_string())
-        } else {
-            (self.github.owner.clone(), self.github.repo.clone())
-        };
+        let (owner, repo) = self.issue_repo(issue)?;
 
         let github = self.github.for_repo(owner, repo);
 
