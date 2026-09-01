@@ -263,6 +263,21 @@ each such issue's PR branch is rebased **inside that issue's own checkout** at
    `publish-android-dev.sh` is run from the repo root, building the new `.apk`
    and copying it to Google Drive. Repos without that script simply skip this step.
 
+When a rebase happens, the console shows it end to end:
+
+```
+REBASE: origin/main moved to 07d4f07 - PR #99 (issue-7) needs a rebase
+  PR: https://github.com/owner/demo/pull/99
+  INFO: Rebasing issue-7 onto origin/main...
+  OK: Rebased 1 commit(s) onto 07d4f07 and force-pushed - PR #99 is up to date (380441b -> da9481f)
+  INFO: Running publish-android-dev.sh to publish a new build...
+  OK: Published a new build for issue-7
+REBASE: Pass complete: 1 rebased, 0 conflicted, 0 errored.
+```
+
+A conflict reports itself just as loudly, and a pass where every PR is already
+current stays silent.
+
 Safety guards: issues currently being processed (holding the workspace lock or
 carrying the `ai-processing` label) are left alone, workspaces with uncommitted
 changes are skipped, and a branch that has diverged from its remote is skipped

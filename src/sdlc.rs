@@ -210,6 +210,9 @@ impl Orchestrator {
     /// onto the latest origin/main and republish the build when that succeeds.
     async fn rebase_open_prs(&self, issues: &[Issue]) {
         let rebaser = AutoRebaser::new(&self.config.auto_rebase, &self.workspace);
+        let mut rebased = 0;
+        let mut conflicted = 0;
+        let mut failed = 0;
 
         for issue in issues {
             let has_enabled = issue.labels.iter().any(|l| l.name == self.config.enabled_label);
@@ -233,14 +236,25 @@ impl Orchestrator {
 
             let github = self.github.for_repo(owner, repo.clone());
             match rebaser.process_issue(&github, &repo, issue.number).await {
+                Ok(RebaseOutcome::Rebased) => rebased += 1,
+                Ok(RebaseOutcome::Conflict) => conflicted += 1,
                 Ok(RebaseOutcome::Skipped) | Ok(RebaseOutcome::AlreadyCurrent) => {}
-                Ok(outcome) => {
-                    println!("  {} Issue #{}: {:?}", "REBASE:".yellow(), issue.number, outcome);
-                }
                 Err(e) => {
+                    failed += 1;
                     eprintln!("{} Auto-rebase failed for issue #{}: {}", "WARN:".yellow(), issue.number, e);
                 }
             }
+        }
+
+        // Stay silent on a pass where every PR was already current.
+        if rebased + conflicted + failed > 0 {
+            println!(
+                "{} Pass complete: {} rebased, {} conflicted, {} errored.",
+                "REBASE:".magenta().bold(),
+                rebased,
+                conflicted,
+                failed
+            );
         }
     }
 

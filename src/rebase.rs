@@ -66,13 +66,39 @@ pub fn is_new_main_sha(state: Option<&RebaseState>, main_sha: &str) -> bool {
     state.map(|s| s.last_main_sha != main_sha).unwrap_or(true)
 }
 
-pub fn parse_pr_number(gh_json: &str) -> Result<Option<u64>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPr {
+    pub number: u64,
+    pub url: String,
+}
+
+pub fn parse_open_pr(gh_json: &str) -> Result<Option<OpenPr>> {
     let trimmed = gh_json.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
     let prs: Vec<serde_json::Value> = serde_json::from_str(trimmed)?;
-    Ok(prs.first().and_then(|pr| pr["number"].as_u64()))
+    Ok(prs.first().and_then(|pr| {
+        Some(OpenPr {
+            number: pr["number"].as_u64()?,
+            url: pr["url"].as_str().unwrap_or_default().to_string(),
+        })
+    }))
+}
+
+/// Tag that makes every auto-rebase line easy to spot (and grep for) in the
+/// orchestrator's output.
+fn tag() -> colored::ColoredString {
+    "REBASE:".magenta().bold()
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..7.min(sha.len())]
+}
+
+/// Number of commits the branch carries on top of `main_ref`.
+fn commits_ahead(repo_dir: &Path, main_ref: &str) -> Option<String> {
+    git_checked(repo_dir, &["rev-list", "--count", &format!("{}..HEAD", main_ref)]).ok()
 }
 
 fn git(repo_dir: &Path, args: &[&str]) -> Result<std::process::Output> {
@@ -190,7 +216,6 @@ pub fn run_publish_script(repo_dir: &Path, script: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    println!("  {} Running {} in {:?}", "INFO:".blue(), script, repo_dir);
     let status = Command::new(&script_path)
         .current_dir(repo_dir)
         .status()
@@ -242,18 +267,21 @@ impl<'a> AutoRebaser<'a> {
             return Ok(RebaseOutcome::Skipped);
         }
 
-        let Some(pr_number) = self.open_pr_number(&repo_dir, &branch)? else {
+        let Some(pr) = self.open_pr(&repo_dir, &branch)? else {
             return Ok(RebaseOutcome::Skipped);
         };
 
         println!(
-            "{} {} moved to {} - rebasing PR #{} for issue #{}",
-            "INFO:".blue(),
+            "{} {} moved to {} - PR #{} ({}) needs a rebase",
+            tag(),
             main_ref,
-            &main_sha[..7.min(main_sha.len())],
-            pr_number,
-            issue_number
+            short_sha(&main_sha).yellow(),
+            pr.number,
+            branch
         );
+        if !pr.url.is_empty() {
+            println!("  {} {}", "PR:".blue(), pr.url);
+        }
 
         abort_in_progress_operations(&repo_dir)?;
 
@@ -284,15 +312,15 @@ impl<'a> AutoRebaser<'a> {
             BranchSync::NoRemote | BranchSync::InSync | BranchSync::LocalAhead => {}
         }
 
+        println!("  {} Rebasing {} onto {}...", "INFO:".blue(), branch, main_ref);
         let result = rebase_branch_onto(&repo_dir, &branch, &main_ref)?;
 
         if result.conflicted {
             self.record(&issue_dir, &main_sha, RebaseOutcome::Conflict)?;
             println!(
-                "  {} Rebase of {} onto {} conflicts; aborted and left for a human.",
-                "WARN:".yellow(),
-                branch,
-                main_ref
+                "  {} Merge conflict - rebase aborted, PR #{} left untouched and needs a manual rebase.",
+                "FAILED:".red().bold(),
+                pr.number
             );
             github
                 .post_comment(
@@ -302,9 +330,9 @@ impl<'a> AutoRebaser<'a> {
                          so the rebase was aborted and PR #{} was left untouched. \
                          It needs a manual rebase before the dev build can be refreshed.",
                         main_ref,
-                        &main_sha[..7.min(main_sha.len())],
+                        short_sha(&main_sha),
                         branch,
-                        pr_number
+                        pr.number
                     ),
                 )
                 .await?;
@@ -313,25 +341,39 @@ impl<'a> AutoRebaser<'a> {
 
         if result.head_after == result.head_before {
             self.record(&issue_dir, &main_sha, RebaseOutcome::AlreadyCurrent)?;
-            println!("  {} {} already contains {}; nothing to publish.", "INFO:".blue(), branch, main_ref);
+            println!("  {} {} already contained {}; nothing to publish.", "OK:".green(), branch, main_ref);
             return Ok(RebaseOutcome::AlreadyCurrent);
         }
 
         force_push(&repo_dir, &branch)?;
         // Recorded before publishing so a build failure never re-triggers the rebase.
         self.record(&issue_dir, &main_sha, RebaseOutcome::Rebased)?;
-        println!("  {} Rebased and force-pushed {} (PR #{})", "INFO:".blue(), branch, pr_number);
+        let ahead = commits_ahead(&repo_dir, &main_ref).unwrap_or_else(|| "?".to_string());
+        println!(
+            "  {} Rebased {} commit(s) onto {} and force-pushed - PR #{} is up to date ({} -> {})",
+            "OK:".green().bold(),
+            ahead,
+            short_sha(&main_sha),
+            pr.number,
+            short_sha(&result.head_before),
+            short_sha(&result.head_after)
+        );
 
-        match run_publish_script(&repo_dir, &self.config.publish_script) {
-            Ok(true) => println!("  {} Published a fresh build for {}", "INFO:".blue(), branch),
+        let repo_dir_for_publish = repo_dir.clone();
+        let script = self.config.publish_script.clone();
+        if repo_dir.join(&script).is_file() {
+            println!("  {} Running {} to publish a new build...", "INFO:".blue(), script);
+        }
+        match run_publish_script(&repo_dir_for_publish, &script) {
+            Ok(true) => println!("  {} Published a new build for {}", "OK:".green().bold(), branch),
             Ok(false) => println!(
                 "  {} No {} in {}; skipping publish.",
                 "INFO:".blue(),
-                self.config.publish_script,
+                script,
                 repo
             ),
             Err(e) => {
-                eprintln!("  {} Publish failed after rebase: {}", "ERROR:".red(), e);
+                eprintln!("  {} Publish failed after rebase: {}", "FAILED:".red().bold(), e);
                 github
                     .post_comment(
                         issue_number,
@@ -339,8 +381,8 @@ impl<'a> AutoRebaser<'a> {
                             "✅ `{}` was rebased onto `{}` (`{}`), but `{}` failed: {}",
                             branch,
                             main_ref,
-                            &main_sha[..7.min(main_sha.len())],
-                            self.config.publish_script,
+                            short_sha(&main_sha),
+                            script,
                             e
                         ),
                     )
@@ -358,10 +400,10 @@ impl<'a> AutoRebaser<'a> {
         )
     }
 
-    fn open_pr_number(&self, repo_dir: &PathBuf, branch: &str) -> Result<Option<u64>> {
+    fn open_pr(&self, repo_dir: &PathBuf, branch: &str) -> Result<Option<OpenPr>> {
         let output = Command::new("gh")
             .current_dir(repo_dir)
-            .args(["pr", "list", "--head", branch, "--state", "open", "--json", "number"])
+            .args(["pr", "list", "--head", branch, "--state", "open", "--json", "number,url"])
             .output()
             .map_err(|e| anyhow!("Failed to run `gh pr list`: {}", e))?;
 
@@ -371,7 +413,7 @@ impl<'a> AutoRebaser<'a> {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        parse_pr_number(&String::from_utf8_lossy(&output.stdout))
+        parse_open_pr(&String::from_utf8_lossy(&output.stdout))
     }
 }
 

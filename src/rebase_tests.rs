@@ -89,11 +89,26 @@ fn test_read_rebase_state_ignores_corrupt_file() {
 }
 
 #[test]
-fn test_parse_pr_number_from_gh_output() {
-    assert_eq!(parse_pr_number("[{\"number\":42}]").unwrap(), Some(42));
-    assert_eq!(parse_pr_number("[]").unwrap(), None);
-    assert_eq!(parse_pr_number("").unwrap(), None);
-    assert_eq!(parse_pr_number("   \n").unwrap(), None);
+fn test_parse_open_pr_from_gh_output() {
+    let parsed = parse_open_pr("[{\"number\":42,\"url\":\"https://github.com/o/r/pull/42\"}]")
+        .unwrap()
+        .unwrap();
+    assert_eq!(parsed.number, 42);
+    assert_eq!(parsed.url, "https://github.com/o/r/pull/42");
+}
+
+#[test]
+fn test_parse_open_pr_without_url_field() {
+    let parsed = parse_open_pr("[{\"number\":42}]").unwrap().unwrap();
+    assert_eq!(parsed.number, 42);
+    assert_eq!(parsed.url, "");
+}
+
+#[test]
+fn test_parse_open_pr_when_no_pr_exists() {
+    assert_eq!(parse_open_pr("[]").unwrap(), None);
+    assert_eq!(parse_open_pr("").unwrap(), None);
+    assert_eq!(parse_open_pr("   \n").unwrap(), None);
 }
 
 #[test]
@@ -259,7 +274,7 @@ async fn test_process_issue_rebases_pushes_and_publishes() {
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let gh = bin_dir.join("gh");
-    fs::write(&gh, "#!/bin/bash\necho '[{\"number\":99}]'\n").unwrap();
+    fs::write(&gh, "#!/bin/bash\necho '[{\"number\":99,\"url\":\"https://github.com/owner/demo/pull/99\"}]'\n").unwrap();
     make_executable(&gh);
     let marker = tmp.path().join("published.txt");
     std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap()));
