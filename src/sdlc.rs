@@ -25,6 +25,24 @@ pub struct Orchestrator {
 }
 
 
+/// Prints the SDLC phase as word art, so it stands out in a long console log,
+/// followed by the agent that will run it and the exact command line used.
+fn announce_state(state: &str, agent_name: &str, agent_command: &str) {
+    println!();
+    for line in crate::banner::big_text(state) {
+        println!("  {}", line.bright_cyan().bold());
+    }
+    println!();
+    println!(
+        "  {} {} {} {}",
+        "STATE:".yellow(),
+        state.bold(),
+        format!("· agent: {} ·", agent_name).yellow(),
+        agent_command.dimmed()
+    );
+    println!();
+}
+
 /// Waits for `duration`, redrawing a one-line countdown in place each second.
 /// Returns Ok(true) when a shutdown signal interrupted the wait.
 async fn wait_with_countdown(duration: std::time::Duration, started_at: &str) -> Result<bool> {
@@ -194,10 +212,10 @@ impl Orchestrator {
             if self.should_process_issue(&issue).await? {
                 let current_state = self.determine_current_state(&issue)?;
                 let agent_config = self.workspace.read_config()?;
+                let agent_name = agent_config.get_agent_for_state(&current_state.name);
                 let agent_command = agent_config.get_command_for_state(&current_state.name);
                 println!("Next issue: #{} - {}", issue.number, issue.title);
-                println!("Current state: {}", current_state.name);
-                println!("Command: {}", agent_command);
+                announce_state(&current_state.name, &agent_name, &agent_command);
                 return Ok(());
             }
         }
@@ -421,10 +439,11 @@ impl Orchestrator {
 
     async fn run_sdlc_step(&self, issue: &Issue, owner: &str, repo: &str) -> Result<()> {
         let current_state = self.determine_current_state(issue)?;
-        println!("  {} Current state: {}", "STATE:".yellow(), current_state.name);
 
         let agent_config = self.workspace.read_config()?;
+        let agent_name = agent_config.get_agent_for_state(&current_state.name);
         let agent_command = agent_config.get_command_for_state(&current_state.name);
+        announce_state(&current_state.name, &agent_name, &agent_command);
         let agent = Agent::new(agent_command);
 
         // Ensure repo is checked out

@@ -115,12 +115,17 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    pub fn get_command_for_state(&self, state: &str) -> String {
-        let agent = self.state_agents
+    /// The agent name that handles `state` - its own entry when it has one,
+    /// otherwise the configured default.
+    pub fn get_agent_for_state(&self, state: &str) -> String {
+        self.state_agents
             .get(state)
             .cloned()
-            .unwrap_or_else(|| self.agents.get("default").cloned().unwrap_or_else(|| "gemini".to_string()));
+            .unwrap_or_else(|| self.agents.get("default").cloned().unwrap_or_else(|| "gemini".to_string()))
+    }
 
+    pub fn get_command_for_state(&self, state: &str) -> String {
+        let agent = self.get_agent_for_state(state);
         let command = self.command_template.replace("{agent}", &agent);
         self.with_streaming_flags(command)
     }

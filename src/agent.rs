@@ -56,9 +56,6 @@ impl Agent {
             }
         };
 
-        println!("{} Executing command: {} (prompt via {})", "DEBUG:".cyan(), self.command_line,
-            if use_prompt_arg { "arg" } else { "stdin" });
-
         let mut command = Command::new(bin);
         command.args(&args);
         if let Some(dir) = current_dir {

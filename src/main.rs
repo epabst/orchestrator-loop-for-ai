@@ -3,6 +3,7 @@ mod github;
 mod workspace;
 mod agent;
 mod agent_stream;
+mod banner;
 mod sdlc;
 mod issue_context;
 mod signal_handler;

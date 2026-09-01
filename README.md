@@ -144,6 +144,26 @@ state_agents:
   ai-review: gemini
 ```
 
+#### Seeing which phase is running
+
+Each SDLC step opens with the phase name as word art, so it is impossible to
+miss when scrolling back through a long run, followed by the agent handling that
+phase and the exact command line the orchestrator invokes:
+
+```
+   ██  ███     ███  ████ █   █ ████ █     ██  ███  █   █ ████ █   █ ███
+  █  █  █      █  █ █    █   █ █    █    █  █ █  █ ██ ██ █    ██  █  █
+  ████  █  ███ █  █ ███  █   █ ███  █    █  █ ███  █ █ █ ███  █ █ █  █
+  █  █  █      █  █ █     █ █  █    █    █  █ █    █   █ █    █  ██  █
+  █  █ ███     ███  ████   █   ████ ████  ██  █    █   █ ████ █   █  █
+
+  STATE: ai-development · agent: sdlc-dev · claude --output-format stream-json --verbose --print --agent sdlc-dev {prompt}
+```
+
+`orchestrator-loop-for-ai --status` prints the same block for the issue it would
+pick up next, which is the quickest way to confirm a `state_agents` override is
+wired up the way you expect.
+
 #### Watching the agent work
 
 Headless agents normally print nothing until they exit, which makes a long
