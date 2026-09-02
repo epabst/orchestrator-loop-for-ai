@@ -4,7 +4,7 @@ use crate::workspace::{Workspace};
 use crate::agent::Agent;
 use crate::issue_context::IssueContextStore;
 use crate::signal_handler::OutputGenerator;
-use crate::rebase::{publish_and_report, AutoRebaser, RebaseOutcome};
+use crate::rebase::{publish_and_report, rebase_in_progress, AutoRebaser, RebaseOutcome};
 use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
@@ -623,7 +623,8 @@ impl Orchestrator {
                         // 2. Fetch and sync with main
                         std::process::Command::new("git").current_dir(&repo_dir).arg("fetch").arg("origin").status()?;
 
-                        // Try rebase first for cleaner history
+                        // Rebase onto main (never merge main into the branch: we
+                        // want a linear history, not a merge commit).
                         let rebase_status = std::process::Command::new("git")
                             .current_dir(&repo_dir)
                             .arg("rebase")
@@ -631,26 +632,10 @@ impl Orchestrator {
                             .status()?;
 
                         if !rebase_status.success() {
-                            println!("{} Rebase conflicts detected, aborting and trying merge...", "WARN:".yellow());
-                            std::process::Command::new("git")
-                                .current_dir(&repo_dir)
-                                .arg("rebase")
-                                .arg("--abort")
-                                .status()?;
-
-                            let merge_status = std::process::Command::new("git")
-                                .current_dir(&repo_dir)
-                                .arg("merge")
-                                .arg("origin/main")
-                                .arg("-m")
-                                .arg("Merge main branch")
-                                .status()?;
-
-                            if !merge_status.success() {
-                                // Merge also has conflicts - invoke agent to resolve
-                                println!("{} Merge conflicts detected, invoking agent to resolve...", "WARN:".yellow());
-                                self.resolve_merge_conflicts(&repo, issue.number).await?;
-                            }
+                            // Rebase hit conflicts - invoke the agent to resolve
+                            // them in place and continue the rebase.
+                            println!("{} Rebase conflicts detected, invoking agent to resolve...", "WARN:".yellow());
+                            self.resolve_rebase_conflicts(&repo, issue.number).await?;
                         }
 
                         // 3. Force Push
@@ -834,7 +819,7 @@ impl Orchestrator {
     }
 
 
-    async fn resolve_merge_conflicts(&self, repo: &str, issue_id: u64) -> Result<()> {
+    async fn resolve_rebase_conflicts(&self, repo: &str, issue_id: u64) -> Result<()> {
         let issue_dir = self.workspace.get_issue_dir(repo, issue_id);
         let repo_dir = issue_dir.join(repo);
 
@@ -850,8 +835,9 @@ impl Orchestrator {
 
         // Build prompt for agent to resolve conflicts
         let mut conflict_prompt = String::from(
-            "A merge conflict has occurred while trying to sync with the latest main branch. \
-             Your changes conflicted with recent changes on main.\n\n\
+            "A rebase conflict has occurred while trying to sync with the latest main branch. \
+             Your changes conflicted with recent changes on main. We are mid-rebase (never merge \
+             main into this branch - it must stay a clean rebase, with no merge commit).\n\n\
              Please resolve these conflicts:\n\n"
         );
 
@@ -865,8 +851,10 @@ impl Orchestrator {
                  1. Read the conflicted files carefully\n\
                  2. Resolve the conflicts by keeping the appropriate code from both versions\n\
                  3. Stage all resolved files with 'git add'\n\
-                 4. Complete the merge with 'git commit -m \"Merge main branch\"'\n\
-                 5. Report {} when done\n",
+                 4. Continue the rebase with 'git rebase --continue' (do NOT run 'git merge' \
+                 or 'git rebase --abort')\n\
+                 5. If more commits conflict, repeat steps 1-4 until the rebase finishes\n\
+                 6. Report {} when done\n",
                 &self.config.merge_conflict_keyword
             )
         );
@@ -878,7 +866,7 @@ impl Orchestrator {
 
         let audit_dir = self.workspace.get_audit_dir(repo, issue_id)?;
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let audit_log_path = audit_dir.join(format!("merge_conflict_resolution_{}.log", timestamp));
+        let audit_log_path = audit_dir.join(format!("rebase_conflict_resolution_{}.log", timestamp));
 
         let response = agent.invoke_interactive(
             &conflict_prompt,
@@ -887,10 +875,17 @@ impl Orchestrator {
         ).await?;
 
         if !response.contains(&self.config.merge_conflict_keyword) {
-            return Err(anyhow!("Agent failed to resolve merge conflicts"));
+            return Err(anyhow!("Agent failed to resolve rebase conflicts"));
         }
 
-        println!("{} Merge conflicts resolved by agent", "INFO:".blue());
+        if rebase_in_progress(&repo_dir) {
+            return Err(anyhow!(
+                "Agent reported rebase conflicts resolved, but a rebase is still in progress in {:?}",
+                repo_dir
+            ));
+        }
+
+        println!("{} Rebase conflicts resolved by agent", "INFO:".blue());
         Ok(())
     }
 
