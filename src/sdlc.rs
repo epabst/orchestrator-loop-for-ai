@@ -927,9 +927,6 @@ impl Orchestrator {
         let github = self.github.for_repo(self.github.owner.clone(), repo.to_string());
         let comments = github.get_issue_comments(issue.number).await?;
         let last_comments: Vec<String> = comments.iter()
-            .rev()
-            .take(10)
-            .rev()
             .map(|c| format!("{}: {}", c.user.login, c.body.as_deref().unwrap_or("")))
             .collect();
 

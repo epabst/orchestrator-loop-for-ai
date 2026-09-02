@@ -101,14 +101,23 @@ impl GithubClient {
         Ok(issues.items)
     }
 
+    /// The most recent 10 comments, oldest first. octocrab's `list_comments`
+    /// builder has no sort/direction option, and GitHub's default order is
+    /// ascending by creation time - so `per_page(10).page(1)` would silently
+    /// return the *oldest* 10 comments on any issue with more than 10,
+    /// missing exactly the recent activity an agent needs. Hitting the route
+    /// directly lets us pass `sort=created&direction=desc` to get the newest
+    /// page instead, then reverse it back to chronological order.
     pub async fn get_issue_comments(&self, issue_number: u64) -> Result<Vec<octocrab::models::issues::Comment>> {
-        let comments = self.client.issues(&self.owner, &self.repo)
-            .list_comments(issue_number)
-            .per_page(10)
-            .page(1u32)
-            .send()
-            .await?;
-        Ok(comments.items)
+        let route = format!(
+            "/repos/{}/{}/issues/{}/comments?sort=created&direction=desc&per_page=10&page=1",
+            self.owner, self.repo, issue_number
+        );
+        let comments: octocrab::Page<octocrab::models::issues::Comment> =
+            self.client.get(&route, None::<&()>).await?;
+        let mut comments = comments.items;
+        comments.reverse();
+        Ok(comments)
     }
 
     pub async fn add_label(&self, issue_number: u64, label: &str) -> Result<()> {
