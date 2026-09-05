@@ -33,6 +33,10 @@ states:
   - name: ai-development
     label: ai-development
     prompt: |
+      First, open issue_context.txt and find the comment marked
+      "MOST RECENT COMMENT" - state in one sentence what it's asking for, then
+      confirm your work this cycle actually implements it (not an earlier
+      comment). If it's already implemented, say why.
       Implement the design:
       • Write failing tests first
       • Implement code to pass tests
@@ -54,6 +58,8 @@ states:
     label: ai-review
     prompt: |
       Review the code against requirements and design (500-1500 characters maximum).
+      Confirm the diff addresses the "MOST RECENT COMMENT" in issue_context.txt
+      specifically (not just an earlier comment) - if it doesn't, REVIEW_FAILED.
       Re-run only the project's fastest full-signal test command (for Kotlin
       Compose Multiplatform repos: `./gradlew desktopTest`); add another
       platform's test task only if the change is specific to that platform.

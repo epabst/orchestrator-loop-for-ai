@@ -108,10 +108,10 @@ impl GithubClient {
     /// missing exactly the recent activity an agent needs. Hitting the route
     /// directly lets us pass `sort=created&direction=desc` to get the newest
     /// page instead, then reverse it back to chronological order.
-    pub async fn get_issue_comments(&self, issue_number: u64) -> Result<Vec<octocrab::models::issues::Comment>> {
+    pub async fn get_issue_comments(&self, issue_number: u64, per_page: u8) -> Result<Vec<octocrab::models::issues::Comment>> {
         let route = format!(
-            "/repos/{}/{}/issues/{}/comments?sort=created&direction=desc&per_page=10&page=1",
-            self.owner, self.repo, issue_number
+            "/repos/{}/{}/issues/{}/comments?sort=created&direction=desc&per_page={}&page=1",
+            self.owner, self.repo, issue_number, per_page
         );
         let comments: octocrab::Page<octocrab::models::issues::Comment> =
             self.client.get(&route, None::<&()>).await?;

@@ -134,6 +134,41 @@ fn escape_html(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Builds the contents of issue_context.txt from raw (login, body, created_at)
+/// comments, oldest first. Drops our own "**Transition:**" comments (posted
+/// from the same account as the human, since we use a personal token rather
+/// than a bot account) so they don't crowd out real feedback in the kept
+/// window, then flags the single newest remaining comment so the agent
+/// can't mistake an older one for the most recent ask.
+fn format_issue_context(
+    title: &str,
+    body: &str,
+    comments: &[(String, String, chrono::DateTime<chrono::Utc>)],
+) -> String {
+    let human_comments: Vec<_> = comments.iter()
+        .filter(|(_, body, _)| !body.starts_with("**Transition:**"))
+        .collect();
+    let last_human_comments = &human_comments[human_comments.len().saturating_sub(10)..];
+    let last_comments: Vec<String> = last_human_comments.iter().enumerate()
+        .map(|(i, (login, body, created_at))| {
+            let marker = if i == last_human_comments.len() - 1 {
+                "MOST RECENT COMMENT - verify this cycle addresses it before finishing: "
+            } else {
+                ""
+            };
+            format!("[{}] {}{}: {}", created_at.to_rfc3339(), marker, login, body)
+        })
+        .collect();
+
+    format!(
+        "Issue Title: {}\nDescription: {}\n\nLast {} Human Comments (bot transition comments excluded, oldest first):\n{}\n",
+        title,
+        body,
+        last_human_comments.len(),
+        last_comments.join("\n")
+    )
+}
+
 impl Orchestrator {
     pub fn new(config: SdlcConfig, github: GithubClient, workspace: Workspace) -> Self {
         let all_repos = github.repo.is_empty();
@@ -930,17 +965,17 @@ impl Orchestrator {
 
     async fn write_context_file(&self, issue: &Issue, _owner: &str, repo: &str) -> Result<()> {
         let github = self.github.for_repo(self.github.owner.clone(), repo.to_string());
-        let comments = github.get_issue_comments(issue.number).await?;
-        let last_comments: Vec<String> = comments.iter()
-            .map(|c| format!("{}: {}", c.user.login, c.body.as_deref().unwrap_or("")))
+        // Fetch a wider window than we keep: our own "**Transition:**" comments
+        // (posted from the same account, since we use a personal token rather
+        // than a bot account) share the last-N slots with genuine human
+        // feedback, so a shallow fetch can leave only 2-3 real comments
+        // visible. Fetch more, then filter them out before truncating.
+        let comments = github.get_issue_comments(issue.number, 30).await?;
+        let comments: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = comments.iter()
+            .map(|c| (c.user.login.clone(), c.body.clone().unwrap_or_default(), c.created_at))
             .collect();
 
-        let context = format!(
-            "Issue Title: {}\nDescription: {}\n\nLast 10 Comments:\n{}\n",
-            issue.title,
-            issue.body.as_deref().unwrap_or(""),
-            last_comments.join("\n")
-        );
+        let context = format_issue_context(&issue.title, issue.body.as_deref().unwrap_or(""), &comments);
 
         let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         let file_path = issue_dir.join("issue_context.txt");

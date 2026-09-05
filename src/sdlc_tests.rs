@@ -228,6 +228,48 @@ fn test_escape_html_empty_string() {
     assert_eq!(escape_html(input), expected);
 }
 
+fn comment(login: &str, body: &str, timestamp: &str) -> (String, String, chrono::DateTime<chrono::Utc>) {
+    (login.to_string(), body.to_string(), timestamp.parse().unwrap())
+}
+
+#[test]
+fn test_format_issue_context_flags_newest_comment_only() {
+    let comments = vec![
+        comment("epabst", "please rename the button", "2026-09-05T15:13:20Z"),
+        comment("epabst", "display the title at the top of the screen", "2026-09-05T15:54:54Z"),
+    ];
+    let context = format_issue_context("Issue title", "Issue body", &comments);
+
+    assert!(context.contains("MOST RECENT COMMENT - verify this cycle addresses it before finishing: epabst: display the title at the top of the screen"));
+    assert!(!context.contains("MOST RECENT COMMENT - verify this cycle addresses it before finishing: epabst: please rename the button"));
+}
+
+#[test]
+fn test_format_issue_context_excludes_bot_transition_comments() {
+    let comments = vec![
+        comment("epabst", "please rename the button", "2026-09-05T15:13:20Z"),
+        comment("epabst", "**Transition:** ai-development -> ai-review (keyword: COMPLETED_DEVELOPMENT)\n\ndone", "2026-09-05T15:18:02Z"),
+    ];
+    let context = format_issue_context("Issue title", "Issue body", &comments);
+
+    assert!(!context.contains("**Transition:**"));
+    assert!(context.contains("MOST RECENT COMMENT - verify this cycle addresses it before finishing: epabst: please rename the button"));
+    assert!(context.contains("Last 1 Human Comments"));
+}
+
+#[test]
+fn test_format_issue_context_keeps_only_last_ten_human_comments() {
+    let comments: Vec<_> = (0..12)
+        .map(|i| comment("epabst", &format!("comment {}", i), &format!("2026-09-05T15:{:02}:00Z", i)))
+        .collect();
+    let context = format_issue_context("Issue title", "Issue body", &comments);
+
+    assert!(context.contains("Last 10 Human Comments"));
+    assert!(!context.contains("comment 0:"));
+    assert!(!context.contains("comment 1:"));
+    assert!(context.contains("MOST RECENT COMMENT - verify this cycle addresses it before finishing: epabst: comment 11"));
+}
+
 #[test]
 fn test_transition_format_single_label() {
     let source_state = "ai-design";
