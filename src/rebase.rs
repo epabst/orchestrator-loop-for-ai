@@ -1,10 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::Agent;
 use crate::config::AutoRebaseConfig;
 use crate::github::GithubClient;
 use crate::workspace::Workspace;
@@ -21,7 +22,8 @@ pub enum RebaseOutcome {
     AlreadyCurrent,
     /// The branch was replayed onto the new `origin/main` and force-pushed.
     Rebased,
-    /// The rebase hit conflicts and was aborted; the PR needs a human.
+    /// The rebase hit conflicts and an agent failed to resolve them, so it was
+    /// aborted; the PR needs a human.
     Conflict,
     /// The PR was merged, so the checkout was moved to `origin/<main>` and a
     /// build of main was published.
@@ -108,6 +110,114 @@ pub fn parse_open_pr(gh_json: &str) -> Result<Option<OpenPr>> {
             url: pr["url"].as_str().unwrap_or_default().to_string(),
         })
     }))
+}
+
+/// The PR for `branch` in the given `state` ("open" or "merged"), if any.
+/// Free function (rather than an `AutoRebaser` method) so callers that just
+/// need a PR lookup - like fetching its review feedback - don't need one.
+pub fn pr_for_branch(repo_dir: &Path, branch: &str, state: &str) -> Result<Option<OpenPr>> {
+    let output = Command::new("gh")
+        .current_dir(repo_dir)
+        .args(["pr", "list", "--head", branch, "--state", state, "--json", "number,url"])
+        .output()
+        .map_err(|e| anyhow!("Failed to run `gh pr list`: {}", e))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`gh pr list` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_open_pr(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// One piece of feedback left directly on a pull request: a review verdict
+/// (approve / request changes / general comment) or an inline comment on a
+/// line of the diff. GitHub models both separately from the issue's comment
+/// thread, so `GithubClient::get_issue_comments` never sees them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrFeedback {
+    pub author: String,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// The file the comment is anchored to, for an inline diff comment.
+    pub path: Option<String>,
+}
+
+fn parse_pr_feedback(gh_json: &str) -> Result<Vec<PrFeedback>> {
+    let trimmed = gh_json.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let items: Vec<serde_json::Value> = serde_json::from_str(trimmed)?;
+    Ok(items
+        .into_iter()
+        .filter_map(|item| {
+            let author = item["author"].as_str()?.to_string();
+            let body = item["body"].as_str()?.to_string();
+            if body.trim().is_empty() {
+                // A bare approval with no comment has nothing to show the agent.
+                return None;
+            }
+            let created_at = item["created_at"].as_str()?.parse().ok()?;
+            let path = item["path"].as_str().map(|s| s.to_string());
+            Some(PrFeedback { author, body, created_at, path })
+        })
+        .collect())
+}
+
+/// Review verdicts (approve / request changes / general comment) left on
+/// `pr_number`.
+fn pr_reviews(repo_dir: &Path, pr_number: u64) -> Result<Vec<PrFeedback>> {
+    let output = Command::new("gh")
+        .current_dir(repo_dir)
+        .args([
+            "api",
+            &format!("repos/{{owner}}/{{repo}}/pulls/{}/reviews", pr_number),
+            "--jq",
+            "[.[] | {author: .user.login, body: .body, created_at: .submitted_at}]",
+        ])
+        .output()
+        .map_err(|e| anyhow!("Failed to run `gh api .../reviews`: {}", e))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`gh api .../reviews` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_pr_feedback(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Inline comments left on specific lines of the diff.
+fn pr_review_comments(repo_dir: &Path, pr_number: u64) -> Result<Vec<PrFeedback>> {
+    let output = Command::new("gh")
+        .current_dir(repo_dir)
+        .args([
+            "api",
+            &format!("repos/{{owner}}/{{repo}}/pulls/{}/comments", pr_number),
+            "--jq",
+            "[.[] | {author: .user.login, body: .body, created_at: .created_at, path: .path}]",
+        ])
+        .output()
+        .map_err(|e| anyhow!("Failed to run `gh api .../comments`: {}", e))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`gh api .../comments` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_pr_feedback(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// All feedback left directly on `pr_number` - review verdicts and inline
+/// diff comments - oldest first. Neither is visible in the issue's own
+/// comment thread, which is why the SDLC context file needs this as a
+/// separate fetch.
+pub fn fetch_pr_feedback(repo_dir: &Path, pr_number: u64) -> Result<Vec<PrFeedback>> {
+    let mut feedback = pr_reviews(repo_dir, pr_number)?;
+    feedback.extend(pr_review_comments(repo_dir, pr_number)?);
+    feedback.sort_by_key(|f| f.created_at);
+    Ok(feedback)
 }
 
 /// Tag that makes every auto-rebase line easy to spot (and grep for) in the
@@ -208,15 +318,16 @@ pub fn branch_sync_status(repo_dir: &Path, branch: &str) -> Result<BranchSync> {
     })
 }
 
-/// Replays `branch` onto `onto`, aborting (and reporting) instead of leaving
-/// conflict markers behind.
+/// Replays `branch` onto `onto`. On conflict the rebase is left mid-flight
+/// (conflict markers and all) rather than aborted, so a caller can hand it to
+/// an agent to resolve and `git rebase --continue`; callers that give up
+/// should call `abort_in_progress_operations` themselves.
 pub fn rebase_branch_onto(repo_dir: &Path, branch: &str, onto: &str) -> Result<RebaseResult> {
     git_checked(repo_dir, &["checkout", branch])?;
     let head_before = rev_parse(repo_dir, "HEAD")?;
 
     let output = git(repo_dir, &["rebase", onto])?;
     if !output.status.success() {
-        git(repo_dir, &["rebase", "--abort"])?;
         return Ok(RebaseResult {
             head_after: head_before.clone(),
             head_before,
@@ -226,6 +337,62 @@ pub fn rebase_branch_onto(repo_dir: &Path, branch: &str, onto: &str) -> Result<R
 
     let head_after = rev_parse(repo_dir, "HEAD")?;
     Ok(RebaseResult { head_before, head_after, conflicted: false })
+}
+
+/// Lists the files a rebase (or merge) has left conflicted in `repo_dir`.
+fn conflicted_files(repo_dir: &Path) -> Result<Vec<String>> {
+    let output = git_checked(repo_dir, &["diff", "--name-only", "--diff-filter=U"])?;
+    Ok(output.lines().map(String::from).collect())
+}
+
+/// Hands an in-progress, conflicted rebase to an agent: it resolves the
+/// conflicted files, stages them, and runs `git rebase --continue` (repeating
+/// if more commits conflict) until the rebase finishes. Returns an error -
+/// leaving the rebase mid-conflict for the caller to abort - if the agent
+/// doesn't report success or the rebase is still in progress afterward.
+pub async fn resolve_conflicts_with_agent(
+    repo_dir: &Path,
+    issue_dir: &Path,
+    audit_log_path: PathBuf,
+    merge_conflict_keyword: &str,
+    agent_command: String,
+) -> Result<()> {
+    let mut conflict_prompt = String::from(
+        "A rebase conflict has occurred while trying to sync with the latest main branch. \
+         Your changes conflicted with recent changes on main. We are mid-rebase (never merge \
+         main into this branch - it must stay a clean rebase, with no merge commit).\n\n\
+         Please resolve these conflicts:\n\n",
+    );
+    for file in conflicted_files(repo_dir)? {
+        conflict_prompt.push_str(&format!("- {}\n", file));
+    }
+    conflict_prompt.push_str(&format!(
+        "\nInstructions:\n\
+         1. Read the conflicted files carefully\n\
+         2. Resolve the conflicts by keeping the appropriate code from both versions\n\
+         3. Stage all resolved files with 'git add'\n\
+         4. Continue the rebase with 'git rebase --continue' (do NOT run 'git merge' \
+         or 'git rebase --abort')\n\
+         5. If more commits conflict, repeat steps 1-4 until the rebase finishes\n\
+         6. Report {} when done\n",
+        merge_conflict_keyword
+    ));
+
+    let agent = Agent::new(agent_command);
+    let response = agent
+        .invoke_interactive(&conflict_prompt, audit_log_path, Some(issue_dir.to_path_buf()))
+        .await?;
+
+    if !response.contains(merge_conflict_keyword) {
+        return Err(anyhow!("Agent failed to resolve rebase conflicts"));
+    }
+    if rebase_in_progress(repo_dir) {
+        return Err(anyhow!(
+            "Agent reported rebase conflicts resolved, but a rebase is still in progress in {:?}",
+            repo_dir
+        ));
+    }
+    Ok(())
 }
 
 pub fn force_push(repo_dir: &Path, branch: &str) -> Result<()> {
@@ -400,11 +567,12 @@ fn record_merged(issue_dir: &Path, main_sha: &str, pr_number: u64) -> Result<()>
 pub struct AutoRebaser<'a> {
     config: &'a AutoRebaseConfig,
     workspace: &'a Workspace,
+    merge_conflict_keyword: String,
 }
 
 impl<'a> AutoRebaser<'a> {
-    pub fn new(config: &'a AutoRebaseConfig, workspace: &'a Workspace) -> Self {
-        Self { config, workspace }
+    pub fn new(config: &'a AutoRebaseConfig, workspace: &'a Workspace, merge_conflict_keyword: String) -> Self {
+        Self { config, workspace, merge_conflict_keyword }
     }
 
     pub fn branch_name(issue_number: u64) -> String {
@@ -488,33 +656,45 @@ impl<'a> AutoRebaser<'a> {
         }
 
         println!("  {} Rebasing {} onto {}...", "INFO:".blue(), branch, main_ref);
-        let result = rebase_branch_onto(&repo_dir, &branch, &main_ref)?;
+        let mut result = rebase_branch_onto(&repo_dir, &branch, &main_ref)?;
 
         if result.conflicted {
-            self.record(&issue_dir, &main_sha, RebaseOutcome::Conflict)?;
             println!(
-                "  {} Merge conflict - rebase aborted, PR #{} left untouched and needs a manual rebase.",
-                "FAILED:".red().bold(),
-                pr.number
+                "  {} Merge conflict - handing the in-progress rebase to an agent to resolve...",
+                "WARN:".yellow()
             );
-            github
-                .post_comment(
-                    issue_number,
-                    &format!(
-                        "🔀 `{}` moved to `{}`, but automatically rebasing `{}` hit merge conflicts, \
-                         so the rebase was aborted and PR #{} was left untouched. \
-                         It needs a manual rebase before the dev build can be refreshed.",
-                        main_ref,
-                        short_sha(&main_sha),
-                        branch,
-                        pr.number
-                    ),
-                )
-                .await?;
-            return Ok(RebaseOutcome::Conflict);
+            if let Err(e) = self.resolve_conflicts(&issue_dir, &repo_dir, repo, issue_number).await {
+                abort_in_progress_operations(&repo_dir)?;
+                self.record(&issue_dir, &main_sha, RebaseOutcome::Conflict)?;
+                println!(
+                    "  {} Agent could not resolve the conflicts ({}) - rebase aborted, PR #{} left untouched and needs a manual rebase.",
+                    "FAILED:".red().bold(),
+                    e,
+                    pr.number
+                );
+                github
+                    .post_comment(
+                        issue_number,
+                        &format!(
+                            "🔀 `{}` moved to `{}`, but automatically rebasing `{}` hit merge conflicts \
+                             and the agent sent to resolve them failed ({}), so the rebase was aborted \
+                             and PR #{} was left untouched. It needs a manual rebase before the dev \
+                             build can be refreshed.",
+                            main_ref,
+                            short_sha(&main_sha),
+                            branch,
+                            e,
+                            pr.number
+                        ),
+                    )
+                    .await?;
+                return Ok(RebaseOutcome::Conflict);
+            }
+            result.head_after = rev_parse(&repo_dir, "HEAD")?;
+            println!("  {} Agent resolved the conflicts and completed the rebase.", "OK:".green().bold());
         }
 
-        if result.head_after == result.head_before {
+        if result.head_after == result.head_before && !result.conflicted {
             self.record(&issue_dir, &main_sha, RebaseOutcome::AlreadyCurrent)?;
             println!("  {} {} already contained {}; no rebase needed.", "OK:".green(), branch, main_ref);
             self.publish(github, issue_number, &issue_dir, &repo_dir, &branch).await;
@@ -538,6 +718,21 @@ impl<'a> AutoRebaser<'a> {
         self.publish(github, issue_number, &issue_dir, &repo_dir, &branch).await;
 
         Ok(RebaseOutcome::Rebased)
+    }
+
+    /// Asks an agent to resolve an in-progress, conflicted rebase for
+    /// `issue_number`, reusing the same agent configured for `ai-pr-creation`
+    /// (the state that already resolves conflicts hit while landing a PR).
+    async fn resolve_conflicts(&self, issue_dir: &Path, repo_dir: &Path, repo: &str, issue_number: u64) -> Result<()> {
+        let agent_config = self.workspace.read_config()?;
+        let agent_command = agent_config.get_command_for_state("ai-pr-creation");
+
+        let audit_dir = self.workspace.get_audit_dir(repo, issue_number)?;
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let audit_log_path = audit_dir.join(format!("auto_rebase_conflict_resolution_{}.log", timestamp));
+
+        resolve_conflicts_with_agent(repo_dir, issue_dir, audit_log_path, &self.merge_conflict_keyword, agent_command)
+            .await
     }
 
     /// A merged PR means this issue's work now lives in `main`, so the build a
@@ -634,28 +829,12 @@ impl<'a> AutoRebaser<'a> {
     }
 
     fn open_pr(&self, repo_dir: &Path, branch: &str) -> Result<Option<OpenPr>> {
-        self.pr_for_branch(repo_dir, branch, "open")
+        pr_for_branch(repo_dir, branch, "open")
     }
 
     /// The most recent merged PR for `branch`; `gh` lists newest first.
     fn merged_pr(&self, repo_dir: &Path, branch: &str) -> Result<Option<OpenPr>> {
-        self.pr_for_branch(repo_dir, branch, "merged")
-    }
-
-    fn pr_for_branch(&self, repo_dir: &Path, branch: &str, state: &str) -> Result<Option<OpenPr>> {
-        let output = Command::new("gh")
-            .current_dir(repo_dir)
-            .args(["pr", "list", "--head", branch, "--state", state, "--json", "number,url"])
-            .output()
-            .map_err(|e| anyhow!("Failed to run `gh pr list`: {}", e))?;
-
-        if !output.status.success() {
-            return Err(anyhow!(
-                "`gh pr list` failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        parse_open_pr(&String::from_utf8_lossy(&output.stdout))
+        pr_for_branch(repo_dir, branch, "merged")
     }
 }
 

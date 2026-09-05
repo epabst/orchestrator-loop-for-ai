@@ -4,7 +4,7 @@ use crate::workspace::{Workspace};
 use crate::agent::Agent;
 use crate::issue_context::IssueContextStore;
 use crate::signal_handler::OutputGenerator;
-use crate::rebase::{publish_and_report, published_merge, rebase_in_progress, AutoRebaser, RebaseOutcome};
+use crate::rebase::{fetch_pr_feedback, publish_and_report, pr_for_branch, published_merge, AutoRebaser, RebaseOutcome};
 use anyhow::{Result, anyhow};
 use colored::*;
 use octocrab::models::issues::Issue;
@@ -144,6 +144,7 @@ fn format_issue_context(
     title: &str,
     body: &str,
     comments: &[(String, String, chrono::DateTime<chrono::Utc>)],
+    pr_feedback: &[(String, String, chrono::DateTime<chrono::Utc>)],
 ) -> String {
     let human_comments: Vec<_> = comments.iter()
         .filter(|(_, body, _)| !body.starts_with("**Transition:**"))
@@ -160,13 +161,37 @@ fn format_issue_context(
         })
         .collect();
 
-    format!(
+    let mut context = format!(
         "Issue Title: {}\nDescription: {}\n\nLast {} Human Comments (bot transition comments excluded, oldest first):\n{}\n",
         title,
         body,
         last_human_comments.len(),
         last_comments.join("\n")
-    )
+    );
+
+    // Review verdicts and inline diff comments left directly on the PR never
+    // show up in the issue's own comment thread above, so they need their
+    // own section - empty until a PR exists.
+    if !pr_feedback.is_empty() {
+        let last_feedback = &pr_feedback[pr_feedback.len().saturating_sub(10)..];
+        let feedback_lines: Vec<String> = last_feedback.iter().enumerate()
+            .map(|(i, (login, body, created_at))| {
+                let marker = if i == last_feedback.len() - 1 {
+                    "MOST RECENT PR FEEDBACK - verify this cycle addresses it before finishing: "
+                } else {
+                    ""
+                };
+                format!("[{}] {}{}: {}", created_at.to_rfc3339(), marker, login, body)
+            })
+            .collect();
+        context.push_str(&format!(
+            "\nLast {} Pull Request Review Comments (oldest first):\n{}\n",
+            last_feedback.len(),
+            feedback_lines.join("\n")
+        ));
+    }
+
+    context
 }
 
 impl Orchestrator {
@@ -381,7 +406,7 @@ impl Orchestrator {
     /// Once that PR is merged, the same pass moves the checkout to main and
     /// publishes a build from there.
     async fn rebase_open_prs(&self, issues: &[Issue]) {
-        let rebaser = AutoRebaser::new(&self.config.auto_rebase, &self.workspace);
+        let rebaser = AutoRebaser::new(&self.config.auto_rebase, &self.workspace, self.config.merge_conflict_keyword.clone());
         let mut rebased = 0;
         let mut merged = 0;
         let mut conflicted = 0;
@@ -702,7 +727,7 @@ impl Orchestrator {
         let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         
         prompt.push_str(&build_workspace_header(&issue_dir, repo));
-        prompt.push_str("- 'issue_context.txt' (Contains issue description and recent comments)\n");
+        prompt.push_str("- 'issue_context.txt' (Contains issue description, recent comments, and PR review feedback)\n");
         prompt.push_str(&format!("- '{}' (Repository directory)\n", repo));
 
         if let Some(doc_file) = &state.doc_file {
@@ -975,7 +1000,9 @@ impl Orchestrator {
             .map(|c| (c.user.login.clone(), c.body.clone().unwrap_or_default(), c.created_at))
             .collect();
 
-        let context = format_issue_context(&issue.title, issue.body.as_deref().unwrap_or(""), &comments);
+        let pr_feedback = self.pr_feedback_for_issue(issue, repo);
+
+        let context = format_issue_context(&issue.title, issue.body.as_deref().unwrap_or(""), &comments, &pr_feedback);
 
         let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
         let file_path = issue_dir.join("issue_context.txt");
@@ -983,72 +1010,71 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Review verdicts and inline diff comments left on this issue's open PR,
+    /// formatted like an issue comment so they slot into the same context
+    /// section. Empty before a PR exists. `gh` failures here are logged and
+    /// swallowed rather than failing the whole SDLC step, since this is
+    /// supplementary context, not something the step depends on.
+    fn pr_feedback_for_issue(&self, issue: &Issue, repo: &str) -> Vec<(String, String, chrono::DateTime<chrono::Utc>)> {
+        let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
+        let repo_dir = issue_dir.join(repo);
+        let branch_name = format!("issue-{}", issue.number);
+
+        let pr = match pr_for_branch(&repo_dir, &branch_name, "open") {
+            Ok(pr) => pr,
+            Err(e) => {
+                eprintln!("{} Could not look up the open PR for issue #{}: {}", "WARN:".yellow(), issue.number, e);
+                return Vec::new();
+            }
+        };
+        let Some(pr) = pr else {
+            return Vec::new();
+        };
+
+        match fetch_pr_feedback(&repo_dir, pr.number) {
+            Ok(feedback) => feedback
+                .into_iter()
+                .map(|f| {
+                    let body = match f.path {
+                        Some(path) => format!("[{}] {}", path, f.body),
+                        None => f.body,
+                    };
+                    (f.author, body, f.created_at)
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!(
+                    "{} Could not fetch PR #{} review feedback for issue #{}: {}",
+                    "WARN:".yellow(),
+                    pr.number,
+                    issue.number,
+                    e
+                );
+                Vec::new()
+            }
+        }
+    }
+
 
     async fn resolve_rebase_conflicts(&self, repo: &str, issue_id: u64) -> Result<()> {
         let issue_dir = self.workspace.get_issue_dir(repo, issue_id);
         let repo_dir = issue_dir.join(repo);
 
-        // Get list of conflicted files
-        let status_output = std::process::Command::new("git")
-            .current_dir(&repo_dir)
-            .arg("diff")
-            .arg("--name-only")
-            .arg("--diff-filter=U")
-            .output()?;
-
-        let conflicted_files = String::from_utf8(status_output.stdout)?;
-
-        // Build prompt for agent to resolve conflicts
-        let mut conflict_prompt = String::from(
-            "A rebase conflict has occurred while trying to sync with the latest main branch. \
-             Your changes conflicted with recent changes on main. We are mid-rebase (never merge \
-             main into this branch - it must stay a clean rebase, with no merge commit).\n\n\
-             Please resolve these conflicts:\n\n"
-        );
-
-        for file in conflicted_files.lines() {
-            conflict_prompt.push_str(&format!("- {}\n", file));
-        }
-
-        conflict_prompt.push_str(
-            &format!(
-                "\nInstructions:\n\
-                 1. Read the conflicted files carefully\n\
-                 2. Resolve the conflicts by keeping the appropriate code from both versions\n\
-                 3. Stage all resolved files with 'git add'\n\
-                 4. Continue the rebase with 'git rebase --continue' (do NOT run 'git merge' \
-                 or 'git rebase --abort')\n\
-                 5. If more commits conflict, repeat steps 1-4 until the rebase finishes\n\
-                 6. Report {} when done\n",
-                &self.config.merge_conflict_keyword
-            )
-        );
-
-        // Invoke agent to resolve conflicts
         let agent_config = self.workspace.read_config()?;
         let agent_command = agent_config.get_command_for_state("ai-pr-creation");
-        let agent = Agent::new(agent_command);
 
         let audit_dir = self.workspace.get_audit_dir(repo, issue_id)?;
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
         let audit_log_path = audit_dir.join(format!("rebase_conflict_resolution_{}.log", timestamp));
 
-        let response = agent.invoke_interactive(
-            &conflict_prompt,
+        crate::rebase::resolve_conflicts_with_agent(
+            &repo_dir,
+            &issue_dir,
             audit_log_path,
-            Some(issue_dir.clone())
-        ).await?;
-
-        if !response.contains(&self.config.merge_conflict_keyword) {
-            return Err(anyhow!("Agent failed to resolve rebase conflicts"));
-        }
-
-        if rebase_in_progress(&repo_dir) {
-            return Err(anyhow!(
-                "Agent reported rebase conflicts resolved, but a rebase is still in progress in {:?}",
-                repo_dir
-            ));
-        }
+            &self.config.merge_conflict_keyword,
+            agent_command,
+        )
+        .await?;
 
         println!("{} Rebase conflicts resolved by agent", "INFO:".blue());
         Ok(())

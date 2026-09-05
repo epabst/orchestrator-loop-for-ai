@@ -122,6 +122,32 @@ fn test_parse_open_pr_when_no_pr_exists() {
 }
 
 #[test]
+fn test_parse_pr_feedback_from_gh_output() {
+    let json = r#"[
+        {"author":"reviewer","body":"please rename this","created_at":"2026-09-05T16:00:00Z","path":"src/main.rs"},
+        {"author":"reviewer","body":"looks good overall","created_at":"2026-09-05T16:05:00Z"}
+    ]"#;
+    let parsed = parse_pr_feedback(json).unwrap();
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].author, "reviewer");
+    assert_eq!(parsed[0].body, "please rename this");
+    assert_eq!(parsed[0].path.as_deref(), Some("src/main.rs"));
+    assert_eq!(parsed[1].path, None);
+}
+
+#[test]
+fn test_parse_pr_feedback_drops_bare_approvals_with_no_body() {
+    let json = r#"[{"author":"reviewer","body":"","created_at":"2026-09-05T16:00:00Z"}]"#;
+    assert_eq!(parse_pr_feedback(json).unwrap(), Vec::new());
+}
+
+#[test]
+fn test_parse_pr_feedback_when_empty() {
+    assert_eq!(parse_pr_feedback("[]").unwrap(), Vec::new());
+    assert_eq!(parse_pr_feedback("").unwrap(), Vec::new());
+}
+
+#[test]
 fn test_rebase_branch_onto_moves_branch_onto_new_main() {
     let tmp = TempDir::new().unwrap();
     let repo = setup_repo(tmp.path());
@@ -153,7 +179,7 @@ fn test_rebase_branch_onto_is_noop_when_already_current() {
 }
 
 #[test]
-fn test_rebase_branch_onto_aborts_on_conflict() {
+fn test_rebase_branch_onto_leaves_conflict_in_progress_for_an_agent() {
     let tmp = TempDir::new().unwrap();
     let repo = setup_repo(tmp.path());
     commit_on_branch(&repo, "issue-1", "shared.txt", "branch version\n");
@@ -163,9 +189,9 @@ fn test_rebase_branch_onto_aborts_on_conflict() {
     let result = rebase_branch_onto(&repo, "issue-1", "origin/main").unwrap();
 
     assert!(result.conflicted);
-    assert_eq!(result.head_before, result.head_after, "a conflicted rebase must leave the branch untouched");
-    assert!(!rebase_in_progress(&repo), "the conflicted rebase must be aborted");
-    assert!(working_tree_clean(&repo).unwrap());
+    assert_eq!(result.head_before, result.head_after, "head must not move until the rebase is resolved");
+    assert!(rebase_in_progress(&repo), "the rebase is left mid-conflict for an agent to continue");
+    assert!(!working_tree_clean(&repo).unwrap(), "conflict markers are left in the working tree");
 }
 
 #[test]
@@ -485,7 +511,7 @@ async fn test_process_issue_rebases_pushes_and_publishes() {
     let config = crate::config::AutoRebaseConfig::default();
     let workspace = Workspace { base_dir: workspace_root };
     let github = GithubClient::new("fake-token".to_string(), "owner".to_string(), "demo".to_string()).unwrap();
-    let rebaser = AutoRebaser::new(&config, &workspace);
+    let rebaser = AutoRebaser::new(&config, &workspace, "MERGE_RESOLVED".to_string());
 
     let outcome = rebaser.process_issue(&github, "demo", 7).await.unwrap();
     assert_eq!(outcome, RebaseOutcome::Rebased);
@@ -568,7 +594,7 @@ async fn test_process_issue_publishes_a_main_build_once_the_pr_is_merged() {
     let config = crate::config::AutoRebaseConfig::default();
     let workspace = Workspace { base_dir: workspace_root };
     let github = GithubClient::new("fake-token".to_string(), "owner".to_string(), "demo".to_string()).unwrap();
-    let rebaser = AutoRebaser::new(&config, &workspace);
+    let rebaser = AutoRebaser::new(&config, &workspace, "MERGE_RESOLVED".to_string());
 
     assert_eq!(rebaser.process_issue(&github, "demo", 7).await.unwrap(), RebaseOutcome::Merged);
 
@@ -585,6 +611,94 @@ async fn test_process_issue_publishes_a_main_build_once_the_pr_is_merged() {
     // The same merge must not be rebuilt on later passes.
     assert_eq!(rebaser.process_issue(&github, "demo", 7).await.unwrap(), RebaseOutcome::Skipped);
     assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
+}
+
+/// End-to-end: a rebase conflict during auto-rebase is handed to an agent,
+/// which resolves it and continues the rebase, so the PR still gets rebased
+/// and republished instead of being left for a human. Ignored for the same
+/// PATH reason as the tests above; run it with:
+///   cargo test -- --ignored --test-threads=1
+#[tokio::test]
+#[ignore]
+async fn test_process_issue_resolves_conflict_via_agent_and_rebases() {
+    let tmp = TempDir::new().unwrap();
+    let workspace_root = tmp.path().join("ai-workspaces");
+    let issue_dir = workspace_root.join("demo-7");
+    fs::create_dir_all(&issue_dir).unwrap();
+
+    let origin = tmp.path().join("origin.git");
+    git_ok(tmp.path(), &["init", "--bare", "-b", "main", origin.to_str().unwrap()]);
+    let repo = issue_dir.join("demo");
+    git_ok(tmp.path(), &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()]);
+    git_ok(&repo, &["config", "user.email", "test@example.com"]);
+    git_ok(&repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("shared.txt"), "line one\n").unwrap();
+    fs::write(
+        repo.join("publish-android-dev.sh"),
+        "#!/bin/bash\nset -e\necho \"$(git rev-parse --abbrev-ref HEAD)\" > \"$PUBLISH_MARKER\"\n",
+    )
+    .unwrap();
+    make_executable(&repo.join("publish-android-dev.sh"));
+    git_ok(&repo, &["add", "."]);
+    git_ok(&repo, &["commit", "-m", "initial"]);
+    git_ok(&repo, &["push", "-u", "origin", "main"]);
+
+    // Branch and main both touch shared.txt, so the auto-rebase conflicts.
+    commit_on_branch(&repo, "issue-7", "shared.txt", "branch version\n");
+    git_ok(&repo, &["push", "-u", "origin", "issue-7"]);
+    advance_main(&repo, "shared.txt", "main version\n");
+    git_ok(&repo, &["checkout", "issue-7"]);
+
+    // Stub `gh` so the PR-existence check reports an open PR.
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let gh = bin_dir.join("gh");
+    fs::write(&gh, "#!/bin/bash\necho '[{\"number\":99,\"url\":\"https://github.com/owner/demo/pull/99\"}]'\n").unwrap();
+    make_executable(&gh);
+
+    // Stub the conflict-resolution agent: it ignores the prompt fed to it on
+    // stdin, resolves shared.txt itself, stages it, and continues the rebase.
+    let agent = bin_dir.join("resolve-agent");
+    fs::write(
+        &agent,
+        format!(
+            "#!/bin/bash\nset -e\ncat > /dev/null\ncd {}\necho resolved > shared.txt\ngit add shared.txt\ngit rebase --continue\necho MERGE_RESOLVED\n",
+            repo.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&agent);
+    fs::write(
+        workspace_root.join("config.yaml"),
+        format!(
+            "command_template: \"{}\"\nagents:\n  default: stub\nstate_agents: {{}}\nstream_json: false\n",
+            agent.display()
+        ),
+    )
+    .unwrap();
+
+    let marker = tmp.path().join("published.txt");
+    std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap()));
+    std::env::set_var("PUBLISH_MARKER", &marker);
+
+    let config = crate::config::AutoRebaseConfig::default();
+    let workspace = Workspace { base_dir: workspace_root };
+    let github = GithubClient::new("fake-token".to_string(), "owner".to_string(), "demo".to_string()).unwrap();
+    let rebaser = AutoRebaser::new(&config, &workspace, "MERGE_RESOLVED".to_string());
+
+    let outcome = rebaser.process_issue(&github, "demo", 7).await.unwrap();
+    assert_eq!(outcome, RebaseOutcome::Rebased, "the agent resolved the conflict, so the rebase should complete");
+
+    // The agent's resolution landed, the rebase is no longer in progress, and
+    // the resulting branch was force-pushed and republished.
+    assert!(!rebase_in_progress(&repo));
+    assert_eq!(fs::read_to_string(repo.join("shared.txt")).unwrap().trim(), "resolved");
+    fetch_origin(&repo).unwrap();
+    assert_eq!(branch_sync_status(&repo, "issue-7").unwrap(), BranchSync::InSync);
+    assert_eq!(fs::read_to_string(&marker).unwrap().trim(), "issue-7");
+
+    let state = read_rebase_state(&issue_dir).unwrap();
+    assert_eq!(state.outcome, RebaseOutcome::Rebased);
 }
 
 fn make_executable(path: &Path) {

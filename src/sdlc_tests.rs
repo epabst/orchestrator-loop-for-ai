@@ -238,7 +238,7 @@ fn test_format_issue_context_flags_newest_comment_only() {
         comment("epabst", "please rename the button", "2026-09-05T15:13:20Z"),
         comment("epabst", "display the title at the top of the screen", "2026-09-05T15:54:54Z"),
     ];
-    let context = format_issue_context("Issue title", "Issue body", &comments);
+    let context = format_issue_context("Issue title", "Issue body", &comments, &[]);
 
     assert!(context.contains("MOST RECENT COMMENT - verify this cycle addresses it before finishing: epabst: display the title at the top of the screen"));
     assert!(!context.contains("MOST RECENT COMMENT - verify this cycle addresses it before finishing: epabst: please rename the button"));
@@ -250,7 +250,7 @@ fn test_format_issue_context_excludes_bot_transition_comments() {
         comment("epabst", "please rename the button", "2026-09-05T15:13:20Z"),
         comment("epabst", "**Transition:** ai-development -> ai-review (keyword: COMPLETED_DEVELOPMENT)\n\ndone", "2026-09-05T15:18:02Z"),
     ];
-    let context = format_issue_context("Issue title", "Issue body", &comments);
+    let context = format_issue_context("Issue title", "Issue body", &comments, &[]);
 
     assert!(!context.contains("**Transition:**"));
     assert!(context.contains("MOST RECENT COMMENT - verify this cycle addresses it before finishing: epabst: please rename the button"));
@@ -262,12 +262,32 @@ fn test_format_issue_context_keeps_only_last_ten_human_comments() {
     let comments: Vec<_> = (0..12)
         .map(|i| comment("epabst", &format!("comment {}", i), &format!("2026-09-05T15:{:02}:00Z", i)))
         .collect();
-    let context = format_issue_context("Issue title", "Issue body", &comments);
+    let context = format_issue_context("Issue title", "Issue body", &comments, &[]);
 
     assert!(context.contains("Last 10 Human Comments"));
     assert!(!context.contains("comment 0:"));
     assert!(!context.contains("comment 1:"));
     assert!(context.contains("MOST RECENT COMMENT - verify this cycle addresses it before finishing: epabst: comment 11"));
+}
+
+#[test]
+fn test_format_issue_context_omits_pr_feedback_section_when_empty() {
+    let context = format_issue_context("Issue title", "Issue body", &[], &[]);
+
+    assert!(!context.contains("Pull Request Review Comments"));
+}
+
+#[test]
+fn test_format_issue_context_includes_pr_feedback() {
+    let pr_feedback = vec![
+        comment("reviewer", "[src/main.rs] this variable name is misleading", "2026-09-05T16:00:00Z"),
+        comment("reviewer", "please also add a test for the empty case", "2026-09-05T16:05:00Z"),
+    ];
+    let context = format_issue_context("Issue title", "Issue body", &[], &pr_feedback);
+
+    assert!(context.contains("Last 2 Pull Request Review Comments"));
+    assert!(context.contains("reviewer: [src/main.rs] this variable name is misleading"));
+    assert!(context.contains("MOST RECENT PR FEEDBACK - verify this cycle addresses it before finishing: reviewer: please also add a test for the empty case"));
 }
 
 #[test]
