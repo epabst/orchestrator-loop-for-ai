@@ -101,23 +101,23 @@ impl GithubClient {
         Ok(issues.items)
     }
 
-    /// The most recent 10 comments, oldest first. octocrab's `list_comments`
-    /// builder has no sort/direction option, and GitHub's default order is
-    /// ascending by creation time - so `per_page(10).page(1)` would silently
-    /// return the *oldest* 10 comments on any issue with more than 10,
-    /// missing exactly the recent activity an agent needs. Hitting the route
-    /// directly lets us pass `sort=created&direction=desc` to get the newest
-    /// page instead, then reverse it back to chronological order.
+    /// All comments on the issue, oldest first. Unlike the repo-wide
+    /// `/issues/comments` endpoint, `/issues/{number}/comments` does not
+    /// support `sort`/`direction` - GitHub silently ignores those params and
+    /// always returns ascending-by-creation order, one page at a time. So
+    /// `per_page(N).page(1)` alone would silently return only the *oldest*
+    /// N comments on any issue with more activity than that, missing exactly
+    /// the recent comments an agent needs. Walking every page with
+    /// `all_pages` instead guarantees the full, correctly-ordered history
+    /// regardless of how many comments the issue has.
     pub async fn get_issue_comments(&self, issue_number: u64, per_page: u8) -> Result<Vec<octocrab::models::issues::Comment>> {
         let route = format!(
-            "/repos/{}/{}/issues/{}/comments?sort=created&direction=desc&per_page={}&page=1",
+            "/repos/{}/{}/issues/{}/comments?per_page={}&page=1",
             self.owner, self.repo, issue_number, per_page
         );
-        let comments: octocrab::Page<octocrab::models::issues::Comment> =
+        let page: octocrab::Page<octocrab::models::issues::Comment> =
             self.client.get(&route, None::<&()>).await?;
-        let mut comments = comments.items;
-        comments.reverse();
-        Ok(comments)
+        Ok(self.client.all_pages(page).await?)
     }
 
     pub async fn add_label(&self, issue_number: u64, label: &str) -> Result<()> {
