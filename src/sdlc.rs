@@ -814,7 +814,12 @@ impl Orchestrator {
                         if output.status.success() {
                             let pr_url = String::from_utf8(output.stdout)?.trim().to_string();
                             let action = if is_empty { "created" } else { "updated" };
-                            final_response = format!("{}\n\nPull Request {}: {}", final_response, action, pr_url);
+                            // Replace the raw multi-turn transcript (agent narration plus the
+                            // PR_REQUESTED/END_PR_REQUEST scaffolding) with just the extracted
+                            // summary, since this is what gets shown to humans (instructions.html,
+                            // the GitHub comment). Keyword matching below uses the original
+                            // `response`, not `final_response`, so this rewrite doesn't affect it.
+                            final_response = format!("**Title:** {}\n\n{}\n\nPull Request {}: {}", title, clean_body, action, pr_url);
 
                             // A PR is only reviewable with a build to try, and the
                             // auto-rebaser will not publish this head: it is already
@@ -844,7 +849,7 @@ impl Orchestrator {
         let mut matched_keyword: Option<String> = None;
 
         for (keyword, _) in &state.keywords {
-            if final_response.contains(keyword) {
+            if response.contains(keyword) {
                 let labels = state.get_labels_for_keyword(keyword);
                 matched_labels.extend(labels);
                 matched_keyword = Some(keyword.clone());
@@ -1040,20 +1045,14 @@ impl Orchestrator {
             if !pr_url.is_empty() { format!(r#"<a href="{}">View Pull Request</a>"#, pr_url) } else { "".to_string() }
         );
 
-        // Improve Markdown-to-HTML conversion
-        let mut formatted_content = content.replace("### ", "<h2>")
+        // Escape first so the content can't inject stray markup, then apply a
+        // light markdown-ish transform on top of the escaped text.
+        let formatted_content = escape_html(content)
+            .replace("### ", "<h2>")
             .replace("**", "<strong>")
-            .replace("`", "<code>");
-
-        // Fix closing tags for markdown-like parsing
-        formatted_content = formatted_content.replace("</strong>", "</strong>") // already correct
-            .replace("</h2>", "</h2>")
-            .replace("</code>", "</code>");
-
-        // Handle paragraphs
-        let formatted_content = formatted_content
+            .replace('`', "<code>")
             .replace("\n\n", "<p>")
-            .replace("\n", "<br>");
+            .replace('\n', "<br>");
 
         // Simple HTML generation with basic CSS
         let html_content = format!(
