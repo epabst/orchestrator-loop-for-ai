@@ -132,9 +132,12 @@ pub fn pr_for_branch(repo_dir: &Path, branch: &str, state: &str) -> Result<Optio
 }
 
 /// One piece of feedback left directly on a pull request: a review verdict
-/// (approve / request changes / general comment) or an inline comment on a
-/// line of the diff. GitHub models both separately from the issue's comment
-/// thread, so `GithubClient::get_issue_comments` never sees them.
+/// (approve / request changes / general comment), an inline comment on a
+/// line of the diff, or a plain comment on the PR's own conversation tab.
+/// The conversation-tab comments use the same API as issue comments, but
+/// keyed on the PR's number - since the SDLC context is built from the
+/// *originating issue's* number, `GithubClient::get_issue_comments` never
+/// sees any of these.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrFeedback {
     pub author: String,
@@ -211,13 +214,39 @@ fn pr_review_comments(repo_dir: &Path, pr_number: u64) -> Result<Vec<PrFeedback>
     parse_pr_feedback(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// All feedback left directly on `pr_number` - review verdicts and inline
-/// diff comments - oldest first. Neither is visible in the issue's own
-/// comment thread, which is why the SDLC context file needs this as a
-/// separate fetch.
+/// Plain comments left on the PR's own conversation tab - the same kind of
+/// comment as an issue comment, but posted under the PR's number rather than
+/// the originating issue's, so `GithubClient::get_issue_comments` never sees
+/// them either.
+fn pr_conversation_comments(repo_dir: &Path, pr_number: u64) -> Result<Vec<PrFeedback>> {
+    let output = Command::new("gh")
+        .current_dir(repo_dir)
+        .args([
+            "api",
+            "--paginate",
+            &format!("repos/{{owner}}/{{repo}}/issues/{}/comments", pr_number),
+            "--jq",
+            "[.[] | {author: .user.login, body: .body, created_at: .created_at}]",
+        ])
+        .output()
+        .map_err(|e| anyhow!("Failed to run `gh api .../issues/.../comments`: {}", e))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`gh api .../issues/.../comments` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_pr_feedback(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// All feedback left directly on `pr_number` - review verdicts, inline diff
+/// comments, and plain conversation-tab comments - oldest first. None of
+/// this is visible in the issue's own comment thread, which is why the SDLC
+/// context file needs this as a separate fetch.
 pub fn fetch_pr_feedback(repo_dir: &Path, pr_number: u64) -> Result<Vec<PrFeedback>> {
     let mut feedback = pr_reviews(repo_dir, pr_number)?;
     feedback.extend(pr_review_comments(repo_dir, pr_number)?);
+    feedback.extend(pr_conversation_comments(repo_dir, pr_number)?);
     feedback.sort_by_key(|f| f.created_at);
     Ok(feedback)
 }
