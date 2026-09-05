@@ -173,6 +173,7 @@ fn pr_reviews(repo_dir: &Path, pr_number: u64) -> Result<Vec<PrFeedback>> {
         .current_dir(repo_dir)
         .args([
             "api",
+            "--paginate",
             &format!("repos/{{owner}}/{{repo}}/pulls/{}/reviews", pr_number),
             "--jq",
             "[.[] | {author: .user.login, body: .body, created_at: .submitted_at}]",
@@ -194,6 +195,7 @@ fn pr_review_comments(repo_dir: &Path, pr_number: u64) -> Result<Vec<PrFeedback>
         .current_dir(repo_dir)
         .args([
             "api",
+            "--paginate",
             &format!("repos/{{owner}}/{{repo}}/pulls/{}/comments", pr_number),
             "--jq",
             "[.[] | {author: .user.login, body: .body, created_at: .created_at, path: .path}]",
