@@ -354,9 +354,13 @@ each such issue's PR branch is rebased **inside that issue's own checkout** at
    `~/ai-workspaces/<repo>-<issue>/.rebase_state.json`). If it has not moved,
    there is nothing to rebase — but the publish check in step 4 still runs.
 3. Rebase `issue-<number>` onto `origin/main`.
-   - **On conflict:** the rebase is aborted, the branch is left exactly as it was,
-     and a comment is posted on the issue asking for a manual rebase. The same
-     conflict is not retried until `origin/main` moves again.
+   - **On conflict:** the rebase is left in progress and handed to the same
+     agent that resolves conflicts during `ai-pr-creation` (an audit log is
+     written to `~/ai-workspaces/audit/<repo>/<issue>/`). If the agent resolves
+     the conflicts and finishes the rebase, it proceeds as a success below. If
+     it fails, the rebase is aborted, the branch is left exactly as it was, and
+     a comment is posted on the issue asking for a manual rebase. Either way,
+     the same conflict is not retried until `origin/main` moves again.
    - **On success:** the branch is force-pushed (`--force-with-lease`), which
      updates the PR.
 4. Publish a build for the branch head, unless that exact head already has one.
