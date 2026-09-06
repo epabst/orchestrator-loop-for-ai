@@ -703,27 +703,19 @@ impl<'a> AutoRebaser<'a> {
                     e,
                     pr.number
                 );
-                github
-                    .post_comment(
-                        issue_number,
-                        &format!(
-                            "🔀 `{}` moved to `{}`, but automatically rebasing `{}` hit merge conflicts \
-                             and the agent sent to resolve them failed ({}), so the rebase was aborted \
-                             and PR #{} was left untouched. It needs a manual rebase before the dev \
-                             build can be refreshed.",
-                            main_ref,
-                            short_sha(&main_sha),
-                            branch,
-                            e,
-                            pr.number
-                        ),
-                    )
-                    .await?;
+                // A label rather than a comment: `main` can move (and this branch
+                // get re-tried) many times before a human rebases it manually, and
+                // a fresh comment per attempt was spamming the issue with the same
+                // "needs a manual rebase" fact. `add_label` is a no-op if it's
+                // already set, so repeat failures stay silent.
+                github.add_label(issue_number, &self.config.needs_manual_rebase_label).await?;
                 return Ok(RebaseOutcome::Conflict);
             }
             result.head_after = rev_parse(&repo_dir, "HEAD")?;
             println!("  {} Agent resolved the conflicts and completed the rebase.", "OK:".green().bold());
         }
+
+        self.clear_manual_rebase_label(github, issue_number).await;
 
         if result.head_after == result.head_before && !result.conflicted {
             self.record(&issue_dir, &main_sha, RebaseOutcome::AlreadyCurrent)?;
@@ -764,6 +756,24 @@ impl<'a> AutoRebaser<'a> {
 
         resolve_conflicts_with_agent(repo_dir, issue_dir, audit_log_path, &self.merge_conflict_keyword, agent_command)
             .await
+    }
+
+    /// Removes the "needs a manual rebase" label left by an earlier conflicted
+    /// attempt, if any. Called once the branch is confirmed current with
+    /// `main` (or its PR is merged), so the label doesn't outlive the problem
+    /// it flagged. Checks first since `remove_label` errors on a label that
+    /// isn't set, and this runs on every successful pass.
+    async fn clear_manual_rebase_label(&self, github: &GithubClient, issue_number: u64) {
+        let label = &self.config.needs_manual_rebase_label;
+        match github.has_label(issue_number, label).await {
+            Ok(true) => {
+                if let Err(e) = github.remove_label(issue_number, label).await {
+                    eprintln!("  {} Could not remove {} label: {}", "WARN:".yellow(), label, e);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("  {} Could not check for {} label: {}", "WARN:".yellow(), label, e),
+        }
     }
 
     /// A merged PR means this issue's work now lives in `main`, so the build a
@@ -823,6 +833,7 @@ impl<'a> AutoRebaser<'a> {
             return Ok(RebaseOutcome::Skipped);
         }
         record_merged(issue_dir, &main_sha, pr.number)?;
+        self.clear_manual_rebase_label(github, issue_number).await;
         Ok(RebaseOutcome::Merged)
     }
 

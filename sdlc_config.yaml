@@ -136,3 +136,4 @@ auto_rebase:
   main_branch: main
   publish_script: publish-android-dev.sh
   check_interval_secs: 300
+  needs_manual_rebase_label: needs-manual-rebase

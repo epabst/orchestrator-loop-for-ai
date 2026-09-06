@@ -40,6 +40,10 @@ fn default_rebase_check_interval_secs() -> u64 {
     300
 }
 
+fn default_needs_manual_rebase_label() -> String {
+    "needs-manual-rebase".to_string()
+}
+
 /// Keeps open PRs current with `origin/<main_branch>` and re-publishes their build
 /// whenever the base branch moves.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -54,6 +58,11 @@ pub struct AutoRebaseConfig {
     /// How often to fetch and compare `origin/<main_branch>`.
     #[serde(default = "default_rebase_check_interval_secs")]
     pub check_interval_secs: u64,
+    /// Applied to the issue when an auto-rebase hits conflicts a resolver agent
+    /// can't clear, instead of posting a fresh comment on every `main` move.
+    /// Removed again once the branch rebases cleanly or its PR is merged.
+    #[serde(default = "default_needs_manual_rebase_label")]
+    pub needs_manual_rebase_label: String,
 }
 
 impl Default for AutoRebaseConfig {
@@ -63,6 +72,7 @@ impl Default for AutoRebaseConfig {
             main_branch: default_main_branch(),
             publish_script: default_publish_script(),
             check_interval_secs: default_rebase_check_interval_secs(),
+            needs_manual_rebase_label: default_needs_manual_rebase_label(),
         }
     }
 }
