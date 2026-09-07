@@ -10,6 +10,7 @@ mod signal_handler;
 mod html_fixer;
 mod rebase;
 mod readme_tests;
+mod rate_limit;
 
 use clap::Parser;
 use anyhow::Result;

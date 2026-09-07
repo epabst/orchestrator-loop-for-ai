@@ -103,6 +103,22 @@ async fn wait_with_countdown(duration: std::time::Duration, started_at: &str) ->
     Ok(false) // No signal
 }
 
+/// Renders a wait duration as e.g. "1h 23m" or "45s", for the rate-limit pause log line.
+fn format_duration_human(d: std::time::Duration) -> String {
+    let total_secs = d.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 use chrono::Local;
 
 /// Whether the agent-driven loop can advance this issue, judged from its labels
@@ -285,8 +301,24 @@ impl Orchestrator {
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("{} Failed to process issue: {}", "ERROR:".red(), e);
                                     self.clear_sticky_state();
+                                    if let Some(rate_limit) = e.downcast_ref::<crate::rate_limit::RateLimitError>() {
+                                        let wait = rate_limit.wait_duration();
+                                        eprintln!(
+                                            "{} Agent hit a usage limit: {}. Pausing for {} instead of retrying immediately.",
+                                            "WARN:".yellow(), rate_limit, format_duration_human(wait)
+                                        );
+                                        if run_once {
+                                            eprintln!("{} --once was requested, so not waiting out the pause.", "INFO:".blue());
+                                        } else {
+                                            let started_at = Local::now().format("%H:%M:%S").to_string();
+                                            if wait_with_countdown(wait, &started_at).await? {
+                                                return Ok(()); // Shutdown signal received during the pause.
+                                            }
+                                        }
+                                    } else {
+                                        eprintln!("{} Failed to process issue: {}", "ERROR:".red(), e);
+                                    }
                                 }
                             }
                         }

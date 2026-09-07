@@ -71,6 +71,38 @@ async fn handles_events_split_across_reads_and_windows_line_endings() {
     assert_eq!(transcript, format!("{}\n", big));
 }
 
+/// A fake agent binary is needed here (rather than feeding text straight to
+/// `read_stdout` like the tests above) because the rate-limit check runs
+/// after the process exits, against the exit status - it's wiring across
+/// `invoke_interactive`, not just the line renderer.
+#[tokio::test]
+async fn surfaces_a_usage_limit_as_a_rate_limit_error_instead_of_a_generic_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let script_path = tmp.path().join("fake_claude.sh");
+    std::fs::write(
+        &script_path,
+        "#!/bin/sh\n\
+         echo '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"You have hit your session limit \\u00b7 resets 11:59pm (UTC)\"}'\n\
+         exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let agent = Agent::new(format!("{} {{prompt}}", script_path.display()));
+    let err = agent
+        .invoke_interactive("do the thing", tmp.path().join("audit.log"), None)
+        .await
+        .unwrap_err();
+
+    let rate_limit = err
+        .downcast_ref::<crate::rate_limit::RateLimitError>()
+        .unwrap_or_else(|| panic!("expected a RateLimitError, got: {}", err));
+    assert!(rate_limit.message.contains("session limit"));
+    assert!(rate_limit.reset_at.is_some(), "should have parsed the (UTC) reset time");
+}
+
 /// Exercises the real `claude` CLI end to end. Not run by default because it
 /// needs the binary, network access and burns tokens:
 /// `cargo test -- --ignored live_claude_run`

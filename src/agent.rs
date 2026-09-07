@@ -8,6 +8,7 @@ use std::io::{self, Write};
 use colored::Colorize;
 
 use crate::agent_stream::StreamRenderer;
+use crate::rate_limit;
 
 pub struct Agent {
     pub command_line: String,
@@ -68,11 +69,12 @@ impl Agent {
         let mut child = command
             .stdin(stdin_cfg)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| anyhow!("Failed to spawn agent: {}", e))?;
 
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to open stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow!("Failed to open stderr"))?;
         let mut audit_file = File::create(&audit_log_path).await?;
 
         println!("{} Sending prompt:\n{}", "DEBUG:".cyan(), prompt);
@@ -87,25 +89,62 @@ impl Agent {
         }
 
         let mut stdout_reader = BufReader::new(stdout);
+        let mut stderr_reader = BufReader::new(stderr);
         let mut renderer = StreamRenderer::new();
+        let mut stderr_buf = String::new();
 
-        let read_task = self.read_stdout(&mut stdout_reader, &mut audit_file, &mut renderer);
+        let stdout_task = self.read_stdout(&mut stdout_reader, &mut audit_file, &mut renderer);
+        let stderr_task = Self::read_stderr(&mut stderr_reader, &mut stderr_buf);
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 let _ = child.kill().await;
                 return Err(anyhow!("Shutdown signal received. Agent process terminated."));
             }
-            res = read_task => {
+            res = async { tokio::try_join!(stdout_task, stderr_task) } => {
                 res?;
                 let status = child.wait().await?;
                 if !status.success() {
+                    // Claude Code reports why a `--print` run failed - including
+                    // usage/rate-limit messages - in the stream's `result` event;
+                    // agents that don't speak stream-json print it to stderr
+                    // instead. Check both so a rate limit is paused on rather
+                    // than retried immediately, which just re-hits the limit
+                    // (and, via the surrounding loop, the GitHub API).
+                    let rate_limited = [renderer.last_result_text(), Some(stderr_buf.as_str())]
+                        .into_iter()
+                        .flatten()
+                        .find_map(rate_limit::detect);
+                    if let Some(err) = rate_limited {
+                        return Err(err.into());
+                    }
                     return Err(anyhow!("Agent failed with status {}", status));
                 }
             }
         }
 
         Ok(renderer.into_transcript())
+    }
+
+    /// Streams the agent's stderr to the console live (as an interactive run
+    /// would show it) while also collecting it, since that's where a
+    /// plain-text agent's usage-limit message ends up.
+    async fn read_stderr<R>(stderr: &mut R, buf: &mut String) -> Result<()>
+    where
+        R: AsyncReadExt + Unpin,
+    {
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stderr.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            let text = String::from_utf8_lossy(&chunk[..n]);
+            eprint!("{}", text);
+            buf.push_str(&text);
+        }
+        let _ = io::stderr().flush();
+        Ok(())
     }
 
     /// Streams the agent's stdout line by line so the run is visible as it

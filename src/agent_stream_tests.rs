@@ -160,6 +160,20 @@ fn keeps_the_result_text_when_nothing_else_reached_the_transcript() {
 }
 
 #[test]
+fn exposes_the_result_events_own_text_for_failure_inspection() {
+    let mut renderer = StreamRenderer::new();
+    assert_eq!(renderer.last_result_text(), None);
+
+    renderer.render_line(
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"You've hit your session limit · resets 1:20pm (America/Denver)"}"#,
+    );
+    assert_eq!(
+        renderer.last_result_text(),
+        Some("You've hit your session limit \u{b7} resets 1:20pm (America/Denver)")
+    );
+}
+
+#[test]
 fn does_not_duplicate_prose_already_in_the_transcript() {
     let (_, transcript) = render_all(&[
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"PR_REQUESTED"}]}}"#,

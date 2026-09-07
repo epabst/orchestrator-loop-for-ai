@@ -61,11 +61,17 @@ pub struct StreamRenderer {
     /// the completed message should not repeat it.
     streamed_text: bool,
     saw_stream_event: bool,
+    /// The most recent `result` event's own `result` text, captured regardless
+    /// of whether it also fed the transcript. This is where Claude Code
+    /// reports why a `--print` run failed (including usage/rate-limit
+    /// messages), so callers need it even when the transcript already holds
+    /// unrelated prose from earlier in the run.
+    last_result_text: Option<String>,
 }
 
 impl StreamRenderer {
     pub fn new() -> Self {
-        Self { transcript: String::new(), streamed_text: false, saw_stream_event: false }
+        Self { transcript: String::new(), streamed_text: false, saw_stream_event: false, last_result_text: None }
     }
 
     /// The agent's prose only - the text completion keywords are matched against.
@@ -76,6 +82,12 @@ impl StreamRenderer {
 
     pub fn into_transcript(self) -> String {
         self.transcript
+    }
+
+    /// The last `result` event's own text, e.g. a usage-limit message on a
+    /// failed run. `None` if no `result` event carried text.
+    pub fn last_result_text(&self) -> Option<&str> {
+        self.last_result_text.as_deref()
     }
 
     /// Renders one line of agent stdout (newline already stripped).
@@ -209,11 +221,13 @@ impl StreamRenderer {
     }
 
     fn render_result(&mut self, event: &Value) -> Vec<RenderedEvent> {
+        self.last_result_text = event["result"].as_str().map(str::to_string);
+
         // The result text repeats the last assistant message, so it only feeds
         // the transcript when nothing else did (e.g. an agent that streams
         // nothing but the final answer).
         if self.transcript.trim().is_empty() {
-            if let Some(text) = event["result"].as_str() {
+            if let Some(text) = &self.last_result_text {
                 self.transcript.push_str(text);
                 self.transcript.push('\n');
             }
