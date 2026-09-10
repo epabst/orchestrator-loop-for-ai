@@ -14,6 +14,35 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// Parses a "PR_REQUESTED ... Title: ... Body: ... [END_PR_REQUEST]" block out
+/// of an agent's final response, returning the extracted (title, body).
+///
+/// The agent is instructed to close the block with a literal "END_PR_REQUEST"
+/// marker, but agents sometimes omit it and go straight to the state's
+/// transition keyword (e.g. "CHANGES_SUMMARIZED"). That keyword is always
+/// present - it's what the orchestrator itself matched on to get here - so
+/// fall back to it as the end-of-block marker rather than silently dropping
+/// the whole PR request and leaving the issue parked with no PR.
+fn parse_pr_request(response: &str, defined_keyword: &str) -> Option<(String, String)> {
+    let pattern = "PR_REQUESTED";
+    let start_idx = response.find(pattern)?;
+    let rest = &response[start_idx + pattern.len()..];
+    let end_idx = rest.find("END_PR_REQUEST").or_else(|| rest.find(defined_keyword))?;
+    let pr_details = rest[..end_idx].trim();
+
+    let title_pattern = "Title:";
+    let body_pattern = "Body:";
+
+    let t_idx = pr_details.find(title_pattern)?;
+    let t_start = t_idx + title_pattern.len();
+    let b_idx = pr_details.find(body_pattern).unwrap_or(pr_details.len());
+    let b_start = b_idx + body_pattern.len();
+
+    let title = pr_details[t_start..b_idx].trim().to_string();
+    let clean_body = pr_details[b_start..].trim().replace(defined_keyword, "").trim().to_string();
+    Some((title, clean_body))
+}
+
 /// Builds the header that tells the agent exactly where it is working.
 ///
 /// The agent runs non-interactively with a permission allow-list, and Claude
@@ -800,138 +829,120 @@ impl Orchestrator {
             println!("{} Finalizing PR: committing, rebasing, and pushing...", "INFO:".blue());
 
             // New parsing logic: PR_REQUESTED \n Title: ... \n Body: ... \n END_PR_REQUEST
-            let pattern = "PR_REQUESTED";
-            if let Some(start_idx) = final_response.find(pattern) {
-                let rest = &final_response[start_idx + pattern.len()..];
-                if let Some(end_idx) = rest.find("END_PR_REQUEST") {
-                    let pr_details = &rest[..end_idx].trim();
+            if let Some((title, clean_body)) = parse_pr_request(&final_response, &self.config.pr_defined_keyword) {
+                let issue_url = format!("https://github.com/{}/{}/issues/{}", self.github.owner, repo, issue.number);
+                let body = format!("{}\n\n---\nRelated issue: {}", clean_body, issue_url);
 
-                    // Extract Title and Body
-                    let title_pattern = "Title:";
-                    let body_pattern = "Body:";
+                let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
+                let repo_dir = issue_dir.join(repo);
+                let branch_name = format!("issue-{}", issue.number);
 
-                    if let Some(t_idx) = pr_details.find(title_pattern) {
-                        let t_start = t_idx + title_pattern.len();
-                        let b_idx = pr_details.find(body_pattern).unwrap_or(pr_details.len());
-                        let b_start = b_idx + body_pattern.len();
+                // 1. Commit all changes
+                std::process::Command::new("git").current_dir(&repo_dir).arg("add").arg(".").status()?;
+                let _commit_status = std::process::Command::new("git")
+                    .current_dir(&repo_dir)
+                    .arg("commit")
+                    .arg("-m")
+                    .arg(&title)
+                    .status()?;
 
-                        let title = pr_details[t_start..b_idx].trim().to_string();
-                        let clean_body = pr_details[b_start..].trim().replace(&self.config.pr_defined_keyword, "").trim().to_string();
-                        let issue_url = format!("https://github.com/{}/{}/issues/{}", self.github.owner, repo, issue.number);
-                        let body = format!("{}\n\n---\nRelated issue: {}", clean_body, issue_url);
+                // If there's nothing to commit (no changes), that's OK
 
-                        let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
-                        let repo_dir = issue_dir.join(repo);
-                        let branch_name = format!("issue-{}", issue.number);
+                // 2. Fetch and sync with main
+                std::process::Command::new("git").current_dir(&repo_dir).arg("fetch").arg("origin").status()?;
 
-                        // 1. Commit all changes
-                        std::process::Command::new("git").current_dir(&repo_dir).arg("add").arg(".").status()?;
-                        let _commit_status = std::process::Command::new("git")
-                            .current_dir(&repo_dir)
-                            .arg("commit")
-                            .arg("-m")
-                            .arg(&title)
-                            .status()?;
+                // Rebase onto main (never merge main into the branch: we
+                // want a linear history, not a merge commit).
+                let rebase_status = std::process::Command::new("git")
+                    .current_dir(&repo_dir)
+                    .arg("rebase")
+                    .arg("origin/main")
+                    .status()?;
 
-                        // If there's nothing to commit (no changes), that's OK
+                if !rebase_status.success() {
+                    // Rebase hit conflicts - invoke the agent to resolve
+                    // them in place and continue the rebase.
+                    println!("{} Rebase conflicts detected, invoking agent to resolve...", "WARN:".yellow());
+                    self.resolve_rebase_conflicts(&repo, issue.number).await?;
+                }
 
-                        // 2. Fetch and sync with main
-                        std::process::Command::new("git").current_dir(&repo_dir).arg("fetch").arg("origin").status()?;
+                // 3. Force Push
+                std::process::Command::new("git").current_dir(&repo_dir).arg("push").arg("-f").arg("origin").arg(&branch_name).status()?;
 
-                        // Rebase onto main (never merge main into the branch: we
-                        // want a linear history, not a merge commit).
-                        let rebase_status = std::process::Command::new("git")
-                            .current_dir(&repo_dir)
-                            .arg("rebase")
-                            .arg("origin/main")
-                            .status()?;
+                // 4. Check for existing PR, create or update
+                let check_output = std::process::Command::new("gh")
+                    .arg("pr")
+                    .arg("list")
+                    .arg("--head")
+                    .arg(&branch_name)
+                    .arg("--json")
+                    .arg("number")
+                    .current_dir(&repo_dir)
+                    .output()?;
 
-                        if !rebase_status.success() {
-                            // Rebase hit conflicts - invoke the agent to resolve
-                            // them in place and continue the rebase.
-                            println!("{} Rebase conflicts detected, invoking agent to resolve...", "WARN:".yellow());
-                            self.resolve_rebase_conflicts(&repo, issue.number).await?;
-                        }
+                let is_empty = check_output.stdout.is_empty() || check_output.stdout == b"[]\n";
 
-                        // 3. Force Push
-                        std::process::Command::new("git").current_dir(&repo_dir).arg("push").arg("-f").arg("origin").arg(&branch_name).status()?;
+                let output = if !is_empty {
+                    // PR exists, update it
+                    println!("{} PR already exists, updating...", "INFO:".blue());
 
-                        // 4. Check for existing PR, create or update
-                        let check_output = std::process::Command::new("gh")
-                            .arg("pr")
-                            .arg("list")
-                            .arg("--head")
-                            .arg(&branch_name)
-                            .arg("--json")
-                            .arg("number")
-                            .current_dir(&repo_dir)
-                            .output()?;
+                    // Get PR details to show the URL
+                    let pr_list_json = String::from_utf8(check_output.stdout)?;
+                    let pr_num = serde_json::from_str::<Vec<serde_json::Value>>(&pr_list_json)?[0]["number"].as_u64().unwrap();
+                    let pr_url = format!("https://github.com/{}/{}/pull/{}", self.github.owner, repo, pr_num);
 
-                        let is_empty = check_output.stdout.is_empty() || check_output.stdout == b"[]\n";
+                    println!("{} Updating existing PR: {}", "INFO:".blue(), pr_url);
 
-                        let output = if !is_empty {
-                            // PR exists, update it
-                            println!("{} PR already exists, updating...", "INFO:".blue());
+                    std::process::Command::new("gh")
+                        .arg("pr")
+                        .arg("edit")
+                        .current_dir(&repo_dir)
+                        .arg("--title")
+                        .arg(&title)
+                        .arg("--body")
+                        .arg(&body)
+                        .output()?
+                } else {
+                    // No PR, create it
+                    println!("{} Creating new PR...", "INFO:".blue());
+                    std::process::Command::new("gh")
+                        .arg("pr")
+                        .arg("create")
+                        .current_dir(&repo_dir)
+                        .arg("--title")
+                        .arg(&title)
+                        .arg("--body")
+                        .arg(&body)
+                        .output()?
+                };
 
-                            // Get PR details to show the URL
-                            let pr_list_json = String::from_utf8(check_output.stdout)?;
-                            let pr_num = serde_json::from_str::<Vec<serde_json::Value>>(&pr_list_json)?[0]["number"].as_u64().unwrap();
-                            let pr_url = format!("https://github.com/{}/{}/pull/{}", self.github.owner, repo, pr_num);
+                if output.status.success() {
+                    let pr_url = String::from_utf8(output.stdout)?.trim().to_string();
+                    let action = if is_empty { "created" } else { "updated" };
+                    // Replace the raw multi-turn transcript (agent narration plus the
+                    // PR_REQUESTED/END_PR_REQUEST scaffolding) with just the extracted
+                    // summary, since this is what gets shown to humans (instructions.html,
+                    // the GitHub comment). Keyword matching below uses the original
+                    // `response`, not `final_response`, so this rewrite doesn't affect it.
+                    final_response = format!("**Title:** {}\n\n{}\n\nPull Request {}: {}", title, clean_body, action, pr_url);
 
-                            println!("{} Updating existing PR: {}", "INFO:".blue(), pr_url);
-
-                            std::process::Command::new("gh")
-                                .arg("pr")
-                                .arg("edit")
-                                .current_dir(&repo_dir)
-                                .arg("--title")
-                                .arg(&title)
-                                .arg("--body")
-                                .arg(&body)
-                                .output()?
-                        } else {
-                            // No PR, create it
-                            println!("{} Creating new PR...", "INFO:".blue());
-                            std::process::Command::new("gh")
-                                .arg("pr")
-                                .arg("create")
-                                .current_dir(&repo_dir)
-                                .arg("--title")
-                                .arg(&title)
-                                .arg("--body")
-                                .arg(&body)
-                                .output()?
-                        };
-
-                        if output.status.success() {
-                            let pr_url = String::from_utf8(output.stdout)?.trim().to_string();
-                            let action = if is_empty { "created" } else { "updated" };
-                            // Replace the raw multi-turn transcript (agent narration plus the
-                            // PR_REQUESTED/END_PR_REQUEST scaffolding) with just the extracted
-                            // summary, since this is what gets shown to humans (instructions.html,
-                            // the GitHub comment). Keyword matching below uses the original
-                            // `response`, not `final_response`, so this rewrite doesn't affect it.
-                            final_response = format!("**Title:** {}\n\n{}\n\nPull Request {}: {}", title, clean_body, action, pr_url);
-
-                            // A PR is only reviewable with a build to try, and the
-                            // auto-rebaser will not publish this head: it is already
-                            // on top of origin/main, so no rebase will ever move it.
-                            if self.config.auto_rebase.enabled {
-                                publish_and_report(
-                                    &github,
-                                    issue.number,
-                                    &issue_dir,
-                                    &repo_dir,
-                                    &branch_name,
-                                    &self.config.auto_rebase.publish_script,
-                                )
-                                .await;
-                            }
-                        } else {
-                            // If PR already exists, try to update it? For now, just report error.
-                            return Err(anyhow!("Failed to manage PR: {}", String::from_utf8_lossy(&output.stderr)));
-                        }
+                    // A PR is only reviewable with a build to try, and the
+                    // auto-rebaser will not publish this head: it is already
+                    // on top of origin/main, so no rebase will ever move it.
+                    if self.config.auto_rebase.enabled {
+                        publish_and_report(
+                            &github,
+                            issue.number,
+                            &issue_dir,
+                            &repo_dir,
+                            &branch_name,
+                            &self.config.auto_rebase.publish_script,
+                        )
+                        .await;
                     }
+                } else {
+                    // If PR already exists, try to update it? For now, just report error.
+                    return Err(anyhow!("Failed to manage PR: {}", String::from_utf8_lossy(&output.stderr)));
                 }
             }
         }

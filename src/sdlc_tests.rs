@@ -394,3 +394,47 @@ enabled_label: ai-enabled
     let config = SdlcConfig::from_yaml(yaml).unwrap();
     assert!(agent_can_advance(&labels(&["ai-enabled", "ai-awaiting-pr-merge"]), &config));
 }
+
+#[test]
+fn test_parse_pr_request_with_end_marker() {
+    let response = "\
+PR_REQUESTED
+Title: Localize TriggerBusterScreen to Spanish
+Body:
+• Did the thing
+• Did another thing
+END_PR_REQUEST
+CHANGES_SUMMARIZED";
+
+    let (title, body) = parse_pr_request(response, "CHANGES_SUMMARIZED").unwrap();
+    assert_eq!(title, "Localize TriggerBusterScreen to Spanish");
+    assert_eq!(body, "• Did the thing\n• Did another thing");
+}
+
+// Regression test for issue #220: an agent run that skipped the
+// "END_PR_REQUEST" marker and went straight to the transition keyword left
+// the issue parked in ai-awaiting-pr-merge with no PR ever created, because
+// the parser required that literal marker and silently gave up without it.
+#[test]
+fn test_parse_pr_request_falls_back_to_defined_keyword_when_end_marker_missing() {
+    let response = "\
+PR_REQUESTED
+Title: Localize TriggerBusterScreen to Spanish
+Body:
+• Continued the app-wide Spanish localization effort
+• Replaced hardcoded strings with stringResource lookups
+
+CHANGES_SUMMARIZED";
+
+    let (title, body) = parse_pr_request(response, "CHANGES_SUMMARIZED").unwrap();
+    assert_eq!(title, "Localize TriggerBusterScreen to Spanish");
+    assert_eq!(
+        body,
+        "• Continued the app-wide Spanish localization effort\n• Replaced hardcoded strings with stringResource lookups"
+    );
+}
+
+#[test]
+fn test_parse_pr_request_returns_none_without_pr_requested_marker() {
+    assert!(parse_pr_request("just some narration", "CHANGES_SUMMARIZED").is_none());
+}
