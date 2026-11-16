@@ -1,4 +1,5 @@
 mod config;
+mod decisions;
 mod github;
 mod workspace;
 mod agent;

@@ -779,7 +779,7 @@ impl Orchestrator {
             }
         }
         // Default to first state if none found but ai-enabled is present
-        Ok(self.config.states[0].clone())
+        Ok(self.config.initial_state().clone())
     }
 
     async fn build_prompt(&self, issue: &Issue, owner: &str, repo: &str, state: &StateConfig) -> Result<String> {
@@ -810,6 +810,18 @@ impl Orchestrator {
             }
         }
 
+        if state.name == "ai-development" {
+            if let Ok(stored) = fs::read_to_string(issue_dir.join(crate::decisions::DECISIONS_FILE)) {
+                let carried = crate::decisions::carry_forward(&stored);
+                if !carried.is_empty() {
+                    prompt.push_str("\nExisting decisions from earlier cycles (drop any that are now obsolete):\n");
+                    for c in carried {
+                        prompt.push_str(&format!("- {}\n", c));
+                    }
+                }
+            }
+        }
+
         prompt.push_str("\nPlease read these files as needed to perform your task.\n");
 
         prompt.push_str("\nInstructions:\n");
@@ -824,6 +836,22 @@ impl Orchestrator {
         let mut final_response = response.to_string();
         let github = self.github.for_repo(self.github.owner.clone(), repo.to_string());
 
+        // ai-development reports decisions: post only the new ones on the
+        // issue and store the full list for the PR description and next run.
+        if state.name == "ai-development" {
+            match crate::decisions::parse_decisions(response) {
+                Some(d) => {
+                    let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
+                    if let Err(e) = fs::write(issue_dir.join(crate::decisions::DECISIONS_FILE), d.format_stored()) {
+                        println!("{} Could not save decisions: {}", "WARN:".yellow(), e);
+                    }
+                    let summary = crate::decisions::summary_before_decisions(response);
+                    final_response = format!("{}\n\n{}", summary, d.format_comment()).trim().to_string();
+                }
+                None => println!("{} No decision sections found in ai-development output; posting raw output", "WARN:".yellow()),
+            }
+        }
+
         // Handle PR creation request
         if state.name == "ai-pr-creation" && final_response.contains("PR_REQUESTED") {
             println!("{} Finalizing PR: committing, rebasing, and pushing...", "INFO:".blue());
@@ -831,9 +859,17 @@ impl Orchestrator {
             // New parsing logic: PR_REQUESTED \n Title: ... \n Body: ... \n END_PR_REQUEST
             if let Some((title, clean_body)) = parse_pr_request(&final_response, &self.config.pr_defined_keyword) {
                 let issue_url = format!("https://github.com/{}/{}/issues/{}", self.github.owner, repo, issue.number);
+                let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
+                let decisions_section = fs::read_to_string(issue_dir.join(crate::decisions::DECISIONS_FILE))
+                    .map(|s| crate::decisions::format_pr_section(&s))
+                    .unwrap_or_default();
+                let clean_body = if decisions_section.is_empty() {
+                    clean_body
+                } else {
+                    format!("{}\n\n{}", clean_body, decisions_section.trim_end())
+                };
                 let body = format!("{}\n\n---\nRelated issue: {}", clean_body, issue_url);
 
-                let issue_dir = self.workspace.get_issue_dir(repo, issue.number);
                 let repo_dir = issue_dir.join(repo);
                 let branch_name = format!("issue-{}", issue.number);
 
