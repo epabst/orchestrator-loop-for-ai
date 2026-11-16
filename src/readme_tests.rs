@@ -56,7 +56,7 @@ mod tests {
         assert!(diagram.contains("stateDiagram-v2"), "Diagram must use stateDiagram-v2");
 
         // Verify diagram has entry and exit points
-        assert!(diagram.contains("[*] --> ai-requirements"), "Entry point [*] --> ai-requirements not found");
+        assert!(diagram.contains("[*] --> ai-development"), "Entry point [*] --> ai-development not found");
         assert!(diagram.contains("ai-done --> [*]"), "Exit point ai-done --> [*] not found");
     }
 

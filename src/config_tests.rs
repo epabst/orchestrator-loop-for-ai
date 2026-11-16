@@ -3,6 +3,27 @@ mod tests {
     use crate::config::SdlcConfig;
 
     #[test]
+    fn test_initial_state_defaults_to_first_and_can_skip() {
+        let base = |extra: &str| format!(r#"
+states:
+  - name: ai-requirements
+    label: ai-requirements
+  - name: ai-development
+    label: ai-development
+failure_label: f
+human_help_label: h
+lock_label: l
+enabled_label: e
+{}"#, extra);
+        let c = SdlcConfig::from_yaml(&base("")).unwrap();
+        assert_eq!(c.initial_state().name, "ai-requirements");
+        let c = SdlcConfig::from_yaml(&base("initial_state: ai-development")).unwrap();
+        assert_eq!(c.initial_state().name, "ai-development");
+        let c = SdlcConfig::from_yaml(&base("initial_state: bogus")).unwrap();
+        assert_eq!(c.initial_state().name, "ai-requirements");
+    }
+
+    #[test]
     fn test_config_parsing_new_format() {
         let yaml = r#"
 states:

@@ -41,7 +41,7 @@ The Orchestrator Loop for AI automates software development tasks by:
 - **VisualizationModule:** Generates and maintains Mermaid state diagrams
 
 ### Supported SDLC States
-- `ai-requirements` - Initial state for new tasks
+- `ai-requirements` - Optional requirements phase (skipped by default; see `initial_state` in `sdlc_config.yaml`)
 - `ai-design` - Design phase
 - `ai-development` - Development/implementation phase
 - `ai-review` - Code review phase
@@ -53,7 +53,7 @@ The Orchestrator Loop for AI automates software development tasks by:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ai-requirements
+    [*] --> ai-development
     
     ai-requirements --> ai-design
     ai-requirements --> ai-human-help

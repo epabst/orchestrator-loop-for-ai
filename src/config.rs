@@ -14,6 +14,10 @@ pub struct SdlcConfig {
     pub merge_conflict_keyword: String,
     #[serde(default)]
     pub auto_rebase: AutoRebaseConfig,
+    /// Name of the state new issues start in. Defaults to the first state.
+    /// Lets the requirements and design states stay defined but be skipped.
+    #[serde(default)]
+    pub initial_state: Option<String>,
 }
 
 fn default_pr_defined_keyword() -> String {
@@ -108,6 +112,15 @@ impl SdlcConfig {
     #[allow(dead_code)]
     pub fn get_state(&self, label: &str) -> Option<&StateConfig> {
         self.states.iter().find(|s| s.label == label)
+    }
+
+    /// The state a new issue starts in: `initial_state` when it names a
+    /// configured state, otherwise the first state.
+    pub fn initial_state(&self) -> &StateConfig {
+        self.initial_state
+            .as_deref()
+            .and_then(|n| self.states.iter().find(|s| s.name == n))
+            .unwrap_or(&self.states[0])
     }
 
     /// The state whose merge the orchestrator watches for, when one is configured.
